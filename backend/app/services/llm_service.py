@@ -111,6 +111,63 @@ Available assets:
 {asset_json}
 """
 
+EXECUTION_SYSTEM_PROMPT = """\
+You are a senior performance creative director. You take one selected ad \
+concept and expand it into a production-ready execution pack for copy, design, \
+and video teams.
+
+Always respond with a single JSON object and no surrounding commentary. Stay \
+grounded in the provided brand brief and concept. Do not invent unsupported \
+claims, customer numbers, guarantees, or product features."""
+
+EXECUTION_USER_PROMPT_TEMPLATE = """\
+Expand this concept into a production-ready execution pack. Return a JSON \
+object with these exact keys:
+
+{{
+  "summary": "string",
+  "headlines": ["3 to 5 headlines"],
+  "primary_text_variants": ["2 to 4 body copy variants"],
+  "ctas": ["3 to 5 CTA options"],
+  "channel_variants": [
+    {{
+      "channel": "string",
+      "format": "string",
+      "headline": "string",
+      "primary_text": "string",
+      "cta": "string"
+    }}
+  ],
+  "design_brief": {{
+    "layout_direction": "string",
+    "asset_strategy": "string",
+    "copy_hierarchy": ["list"],
+    "visual_notes": ["list"]
+  }},
+  "video_brief": {{
+    "concept": "string",
+    "opening_shot": "string",
+    "shot_list": ["list"],
+    "voiceover_script": "string",
+    "end_frame": "string",
+    "veo_prompt": "string"
+  }},
+  "production_checklist": ["list"]
+}}
+
+Brand profile:
+{brand_json}
+
+Creative brief:
+{brief_json}
+
+Selected concept:
+{concept_json}
+
+Available assets:
+{asset_json}
+"""
+
 
 class LLMService:
     """Wraps the Anthropic SDK for brand-analysis tasks."""
@@ -238,5 +295,34 @@ class LLMService:
             logger.exception(
                 "LLM creative studio generation failed for brand %s",
                 brand_context.get("id", "unknown"),
+            )
+            raise
+
+    async def generate_execution_pack(
+        self,
+        brand_context: dict[str, Any],
+        brief: dict[str, Any],
+        concept: dict[str, Any],
+        asset_context: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Generate copy, design, and video outputs for one concept."""
+        user_message = EXECUTION_USER_PROMPT_TEMPLATE.format(
+            brand_json=json.dumps(brand_context, indent=2),
+            brief_json=json.dumps(brief, indent=2),
+            concept_json=json.dumps(concept, indent=2),
+            asset_json=json.dumps(asset_context, indent=2),
+        )
+
+        try:
+            return await self._request_json(
+                system_prompt=EXECUTION_SYSTEM_PROMPT,
+                user_message=user_message,
+                max_tokens=5000,
+            )
+        except Exception:
+            logger.exception(
+                "LLM execution pack generation failed for brand %s concept %s",
+                brand_context.get("id", "unknown"),
+                concept.get("id", "unknown"),
             )
             raise

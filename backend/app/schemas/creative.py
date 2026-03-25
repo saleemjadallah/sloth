@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -133,6 +134,11 @@ class SavedCreativeExecutionSummary(BaseModel):
     delivery_mode: str
     status: str
     destination_label: str | None = None
+    external_post_id: str | None = None
+    external_post_url: str | None = None
+    last_publish_error: str | None = None
+    scheduled_for: datetime | None = None
+    published_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -148,8 +154,47 @@ class SavedCreativeExecutionResponse(BaseModel):
     delivery_mode: str
     status: str
     destination_label: str | None = None
+    external_post_id: str | None = None
+    external_post_url: str | None = None
+    last_publish_error: str | None = None
+    publishing_metadata: dict | None = None
+    scheduled_for: datetime | None = None
+    published_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
     brief: CreativeBrief
     concept: CreativeConcept
     execution: CreativeExecutionResponse
+
+
+class LateAccountProfile(BaseModel):
+    id: str
+    name: str
+    slug: str | None = None
+
+
+class LateAccountResponse(BaseModel):
+    id: str
+    platform: str
+    username: str | None = None
+    display_name: str | None = None
+    profile_url: str | None = None
+    is_active: bool = True
+    profile: LateAccountProfile | None = None
+
+
+class PublishSavedCreativeExecutionRequest(BaseModel):
+    account_ids: list[str] = Field(default_factory=list)
+    mode: Literal["draft", "publish_now", "schedule"] = "publish_now"
+    timezone: str = "UTC"
+    scheduled_for: datetime | None = None
+    title: str | None = None
+    content_override: str | None = None
+
+
+class PublishSavedCreativeExecutionResponse(BaseModel):
+    saved_execution: SavedCreativeExecutionResponse
+    remote_post_id: str | None = None
+    remote_post_status: str | None = None
+    remote_post_url: str | None = None
+    message: str = ""

@@ -43,6 +43,8 @@ class Settings(BaseSettings):
 
     # ── Zernio (ad placement / analytics) ──────────────────────────────
     ZERNIO_API_KEY: str = ""
+    LATE_API_KEY: str = ""
+    LATE_API_BASE_URL: str = "https://getlate.dev/api/v1"
 
     # ── Cloudflare R2 (S3-compatible storage) ──────────────────────────
     R2_ENDPOINT: str = ""

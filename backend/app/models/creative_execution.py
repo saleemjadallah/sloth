@@ -51,9 +51,25 @@ class CreativeExecution(Base):
         nullable=True,
         comment="Optional publishing target label, such as late.dev workspace/campaign",
     )
+    external_post_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="Late/Zernio post ID for published or scheduled content",
+    )
+    external_post_url: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Public platform URL if available after publish",
+    )
+    last_publish_error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Last publish error from Late/Zernio if a publish attempt failed",
+    )
     brief: Mapped[dict] = mapped_column(JSONB, nullable=False)
     concept: Mapped[dict] = mapped_column(JSONB, nullable=False)
     execution: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    publishing_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -65,6 +81,14 @@ class CreativeExecution(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+    scheduled_for: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     brand: Mapped["Brand"] = relationship(back_populates="creative_executions")  # noqa: F821

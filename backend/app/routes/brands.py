@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-import uuid
 import logging
+import uuid
+from datetime import datetime, timezone
 from typing import Sequence
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from sqlalchemy import select
@@ -28,6 +30,9 @@ from app.schemas.creative import (
     CreativeExecutionRequest,
     CreativeExecutionResponse,
     CreativeStudioResponse,
+    LateAccountResponse,
+    PublishSavedCreativeExecutionRequest,
+    PublishSavedCreativeExecutionResponse,
     SavedCreativeExecutionCreate,
     SavedCreativeExecutionResponse,
     SavedCreativeExecutionSummary,
@@ -37,6 +42,7 @@ from app.services.asset_extractor import AssetExtractor
 from app.services.brand_analysis import BrandAnalysisService
 from app.services.creative_studio import CreativeStudioService
 from app.services.firecrawl_service import FirecrawlService
+from app.services.late_service import LateService
 from app.services.llm_service import LLMService
 
 logger = logging.getLogger(__name__)
@@ -66,6 +72,20 @@ def _get_creative_studio_service() -> CreativeStudioService:
     if settings.ANTHROPIC_API_KEY:
         llm = LLMService(anthropic_api_key=settings.ANTHROPIC_API_KEY)
     return CreativeStudioService(llm_service=llm)
+
+
+def _get_late_service() -> LateService:
+    """Build the Late publishing service using current config."""
+    api_key = settings.LATE_API_KEY or settings.ZERNIO_API_KEY
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Late integration is not configured. Set LATE_API_KEY.",
+        )
+    return LateService(
+        api_key=api_key,
+        base_url=settings.LATE_API_BASE_URL,
+    )
 
 
 async def _get_brand_or_404(
@@ -346,6 +366,192 @@ async def export_brand_creative_execution(
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.get(
+    "/{brand_id}/late/accounts",
+    response_model=list[LateAccountResponse],
+    summary="List connected Late social accounts",
+)
+async def list_brand_late_accounts(
+    brand_id: uuid.UUID,
+    profile_id: str | None = Query(None, alias="profileId"),
+    platform: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, object]]:
+    """Return connected Late accounts available to the API key."""
+    await _get_brand_or_404(brand_id, db)
+    late = _get_late_service()
+
+    try:
+        accounts = await late.list_accounts(profile_id=profile_id, platform=platform)
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text or "Late account lookup failed."
+        raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Late account lookup failed: {exc}",
+        ) from exc
+
+    normalized_accounts = []
+    for account in accounts:
+        profile = account.get("profileId")
+        normalized_accounts.append(
+            {
+                "id": account.get("_id") or account.get("id") or "",
+                "platform": account.get("platform") or "",
+                "username": account.get("username"),
+                "display_name": account.get("displayName"),
+                "profile_url": account.get("profileUrl"),
+                "is_active": bool(account.get("isActive", True)),
+                "profile": (
+                    {
+                        "id": profile.get("_id") or profile.get("id") or "",
+                        "name": profile.get("name") or "",
+                        "slug": profile.get("slug"),
+                    }
+                    if isinstance(profile, dict)
+                    else None
+                ),
+            }
+        )
+    return normalized_accounts
+
+
+@router.post(
+    "/{brand_id}/creative-executions/{execution_id}/publish",
+    response_model=PublishSavedCreativeExecutionResponse,
+    summary="Send a saved execution to Late for draft, scheduling, or publish-now",
+)
+async def publish_brand_creative_execution(
+    brand_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    body: PublishSavedCreativeExecutionRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """Publish a saved execution via Late."""
+    if not body.account_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one Late account must be selected.",
+        )
+    if body.mode == "schedule" and body.scheduled_for is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="scheduled_for is required when mode is schedule.",
+        )
+
+    record = await _get_saved_execution_or_404(brand_id, execution_id, db)
+    late = _get_late_service()
+
+    try:
+        accounts = await late.list_accounts()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text or "Late account lookup failed."
+        raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Late account lookup failed: {exc}",
+        ) from exc
+
+    selected_accounts = [
+        account for account in accounts if (account.get("_id") or account.get("id")) in set(body.account_ids)
+    ]
+    if len(selected_accounts) != len(set(body.account_ids)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="One or more selected Late accounts could not be found.",
+        )
+
+    execution = record.execution or {}
+    content = (
+        body.content_override
+        or "\n\n".join(
+            part
+            for part in [
+                (execution.get("headlines") or [record.concept_name])[0],
+                (execution.get("primary_text_variants") or [record.summary])[0],
+                f"CTA: {(execution.get('ctas') or ['Learn More'])[0]}",
+            ]
+            if part
+        )
+    )
+
+    payload: dict[str, object] = {
+        "title": body.title or record.concept_name,
+        "content": content,
+        "platforms": [
+            {
+                "platform": account.get("platform"),
+                "accountId": account.get("_id") or account.get("id"),
+            }
+            for account in selected_accounts
+        ],
+        "timezone": body.timezone,
+        "metadata": {
+            "brandId": str(record.brand_id),
+            "creativeExecutionId": str(record.id),
+            "conceptId": record.concept_id,
+            "deliveryMode": record.delivery_mode,
+        },
+    }
+
+    if body.mode == "draft":
+        payload["isDraft"] = True
+    elif body.mode == "publish_now":
+        payload["publishNow"] = True
+    elif body.mode == "schedule" and body.scheduled_for is not None:
+        payload["scheduledFor"] = body.scheduled_for.astimezone(timezone.utc).isoformat()
+
+    try:
+        remote = await late.create_post(payload)
+    except httpx.HTTPStatusError as exc:
+        record.status = "failed"
+        record.last_publish_error = exc.response.text or "Late publish failed."
+        await db.flush()
+        detail = exc.response.text or "Late publish failed."
+        raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
+    except httpx.HTTPError as exc:
+        record.status = "failed"
+        record.last_publish_error = str(exc)
+        await db.flush()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Late publish failed: {exc}",
+        ) from exc
+
+    post = remote.get("post", {}) if isinstance(remote, dict) else {}
+    platforms = post.get("platforms", []) if isinstance(post, dict) else []
+    first_platform = platforms[0] if platforms else {}
+    remote_status = post.get("status") or ("draft" if body.mode == "draft" else None)
+
+    record.external_post_id = post.get("_id")
+    record.external_post_url = first_platform.get("platformPostUrl")
+    record.last_publish_error = None
+    record.publishing_metadata = remote
+    record.destination_label = record.destination_label or body.title or record.destination_label
+    record.scheduled_for = body.scheduled_for if body.mode == "schedule" else None
+    record.published_at = datetime.now(timezone.utc) if body.mode == "publish_now" else None
+    if body.mode == "draft":
+        record.status = "draft"
+    elif body.mode == "schedule":
+        record.status = "queued"
+    else:
+        record.status = "published"
+    await db.flush()
+    await db.refresh(record)
+
+    service = _get_creative_studio_service()
+    saved_execution = service.serialize_saved_execution(record)
+    return {
+        "saved_execution": saved_execution,
+        "remote_post_id": record.external_post_id,
+        "remote_post_status": remote_status,
+        "remote_post_url": record.external_post_url,
+        "message": remote.get("message", "Post synced with Late.") if isinstance(remote, dict) else "Post synced with Late.",
+    }
 
 
 @router.get(
