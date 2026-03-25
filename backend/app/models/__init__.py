@@ -2,5 +2,6 @@
 
 from app.models.brand import Brand  # noqa: F401
 from app.models.brand_asset import BrandAsset  # noqa: F401
+from app.models.creative_execution import CreativeExecution  # noqa: F401
 
-__all__ = ["Brand", "BrandAsset"]
+__all__ = ["Brand", "BrandAsset", "CreativeExecution"]

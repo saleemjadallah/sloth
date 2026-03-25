@@ -7,6 +7,7 @@ import logging
 from typing import Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -15,6 +16,7 @@ from app.config import settings
 from app.database import get_db
 from app.models.brand import Brand
 from app.models.brand_asset import BrandAsset
+from app.models.creative_execution import CreativeExecution
 from app.schemas.brand import (
     BrandAnalyzeRequest,
     BrandAssetResponse,
@@ -22,7 +24,14 @@ from app.schemas.brand import (
     BrandProfile,
     BrandUpdate,
 )
-from app.schemas.creative import CreativeStudioResponse
+from app.schemas.creative import (
+    CreativeExecutionRequest,
+    CreativeExecutionResponse,
+    CreativeStudioResponse,
+    SavedCreativeExecutionCreate,
+    SavedCreativeExecutionResponse,
+    SavedCreativeExecutionSummary,
+)
 from app.services.asset_classifier import AssetClassifier
 from app.services.asset_extractor import AssetExtractor
 from app.services.brand_analysis import BrandAnalysisService
@@ -81,6 +90,29 @@ async def _get_brand_or_404(
             detail=f"Brand {brand_id} not found.",
         )
     return brand
+
+
+async def _get_saved_execution_or_404(
+    brand_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    db: AsyncSession,
+) -> CreativeExecution:
+    """Fetch a saved execution by ID and brand or raise 404."""
+    result = await db.execute(
+        select(CreativeExecution)
+        .options(selectinload(CreativeExecution.brand))
+        .where(
+            CreativeExecution.id == execution_id,
+            CreativeExecution.brand_id == brand_id,
+        )
+    )
+    execution = result.scalar_one_or_none()
+    if execution is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Creative execution {execution_id} not found for brand {brand_id}.",
+        )
+    return execution
 
 
 # ── Endpoints ───────────────────────────────────────────────────────────
@@ -201,6 +233,119 @@ async def get_brand_creative_studio(
     brand = await _get_brand_or_404(brand_id, db, with_assets=True)
     service = _get_creative_studio_service()
     return await service.build_studio(brand=brand, concept_count=concept_count)
+
+
+@router.post(
+    "/{brand_id}/creative-execution",
+    response_model=CreativeExecutionResponse,
+    summary="Expand a concept into copy, design, and video outputs",
+)
+async def create_brand_creative_execution(
+    brand_id: uuid.UUID,
+    body: CreativeExecutionRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """Build an execution pack for a selected concept."""
+    brand = await _get_brand_or_404(brand_id, db, with_assets=True)
+    service = _get_creative_studio_service()
+    return await service.build_execution_pack(
+        brand=brand,
+        brief=body.brief,
+        concept=body.concept,
+    )
+
+
+@router.post(
+    "/{brand_id}/creative-executions",
+    response_model=SavedCreativeExecutionResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Save a generated execution pack",
+)
+async def save_brand_creative_execution(
+    brand_id: uuid.UUID,
+    body: SavedCreativeExecutionCreate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """Persist an execution pack for export and publishing workflows."""
+    brand = await _get_brand_or_404(brand_id, db, with_assets=True)
+
+    record = CreativeExecution(
+        brand_id=brand.id,
+        concept_id=body.concept.id,
+        concept_name=body.concept.name,
+        summary=body.execution.summary,
+        delivery_mode=body.delivery_mode,
+        status=body.status,
+        destination_label=body.destination_label,
+        brief=body.brief.model_dump(),
+        concept=body.concept.model_dump(),
+        execution=body.execution.model_dump(),
+    )
+    db.add(record)
+    await db.flush()
+    await db.refresh(record)
+
+    service = _get_creative_studio_service()
+    return service.serialize_saved_execution(record)
+
+
+@router.get(
+    "/{brand_id}/creative-executions",
+    response_model=list[SavedCreativeExecutionSummary],
+    summary="List saved execution packs for a brand",
+)
+async def list_brand_creative_executions(
+    brand_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, object]]:
+    """Return saved execution packs ordered by most recent first."""
+    await _get_brand_or_404(brand_id, db)
+    result = await db.execute(
+        select(CreativeExecution)
+        .where(CreativeExecution.brand_id == brand_id)
+        .order_by(CreativeExecution.updated_at.desc(), CreativeExecution.created_at.desc())
+    )
+    records = result.scalars().all()
+    service = _get_creative_studio_service()
+    return [service.serialize_saved_execution_summary(record) for record in records]
+
+
+@router.get(
+    "/{brand_id}/creative-executions/{execution_id}",
+    response_model=SavedCreativeExecutionResponse,
+    summary="Get a saved execution pack",
+)
+async def get_brand_creative_execution(
+    brand_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """Return one persisted execution pack."""
+    record = await _get_saved_execution_or_404(brand_id, execution_id, db)
+    service = _get_creative_studio_service()
+    return service.serialize_saved_execution(record)
+
+
+@router.get(
+    "/{brand_id}/creative-executions/{execution_id}/export",
+    summary="Export a saved execution pack as markdown, text, or JSON",
+    response_model=None,
+)
+async def export_brand_creative_execution(
+    brand_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    export_format: str = Query("markdown", alias="format", pattern="^(markdown|txt|json)$"),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Render a saved execution as a downloadable document."""
+    record = await _get_saved_execution_or_404(brand_id, execution_id, db)
+    service = _get_creative_studio_service()
+    content, media_type, filename = service.build_export_document(record, export_format)
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get(

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
+import json
 from datetime import datetime, timezone
 from typing import Any
 
 from app.models.brand import Brand
+from app.models.creative_execution import CreativeExecution as CreativeExecutionRecord
+from app.schemas.creative import CreativeBrief, CreativeConcept
 from app.services.llm_service import LLMService
 
 logger = logging.getLogger(__name__)
@@ -60,6 +63,57 @@ class CreativeStudioService:
 
         payload["brand_id"] = brand.id
         payload["brand_name"] = brand.name or brand.website_url
+        payload["generated_at"] = datetime.now(timezone.utc)
+        payload["used_fallback"] = used_fallback
+        return payload
+
+    async def build_execution_pack(
+        self,
+        brand: Brand,
+        brief: CreativeBrief,
+        concept: CreativeConcept,
+    ) -> dict[str, Any]:
+        """Expand a selected concept into copy, design, and video outputs."""
+        asset_context = self._serialize_assets(brand)
+        selected_assets = [
+            asset for asset in asset_context if asset["id"] in set(concept.asset_ids)
+        ]
+        fallback_payload = self._build_execution_fallback(
+            brand=brand,
+            brief=brief.model_dump(),
+            concept=concept.model_dump(),
+            asset_context=asset_context,
+            selected_assets=selected_assets,
+        )
+
+        payload = fallback_payload
+        used_fallback = True
+
+        if self._llm is not None:
+            try:
+                llm_payload = await self._llm.generate_execution_pack(
+                    brand_context=self._serialize_brand(brand),
+                    brief=brief.model_dump(),
+                    concept=concept.model_dump(),
+                    asset_context=asset_context,
+                )
+                payload = self._normalize_execution_payload(
+                    payload=llm_payload,
+                    fallback_payload=fallback_payload,
+                )
+                used_fallback = False
+            except Exception:
+                logger.exception(
+                    "Creative execution generation failed for brand %s concept %s",
+                    brand.id,
+                    concept.id,
+                )
+                payload = fallback_payload
+
+        payload["brand_id"] = brand.id
+        payload["brand_name"] = brand.name or brand.website_url
+        payload["concept_id"] = concept.id
+        payload["concept_name"] = concept.name
         payload["generated_at"] = datetime.now(timezone.utc)
         payload["used_fallback"] = used_fallback
         return payload
@@ -350,6 +404,237 @@ class CreativeStudioService:
             "concepts": concepts[:concept_count],
         }
 
+    def _normalize_execution_payload(
+        self,
+        payload: dict[str, Any],
+        fallback_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Clean execution output while preserving a safe fallback."""
+        channel_variants = payload.get("channel_variants")
+        normalized_channel_variants = []
+        if isinstance(channel_variants, list):
+            for variant in channel_variants[:4]:
+                if not isinstance(variant, dict):
+                    continue
+                headline = str(variant.get("headline") or "").strip()
+                primary_text = str(variant.get("primary_text") or "").strip()
+                cta = str(variant.get("cta") or "").strip()
+                if not (headline and primary_text and cta):
+                    continue
+                normalized_channel_variants.append(
+                    {
+                        "channel": str(variant.get("channel") or "Paid social"),
+                        "format": str(variant.get("format") or "feed"),
+                        "headline": headline,
+                        "primary_text": primary_text,
+                        "cta": cta,
+                    }
+                )
+
+        design_brief = payload.get("design_brief") if isinstance(payload.get("design_brief"), dict) else {}
+        video_brief = payload.get("video_brief") if isinstance(payload.get("video_brief"), dict) else {}
+
+        return {
+            "summary": str(payload.get("summary") or fallback_payload["summary"]),
+            "headlines": self._clean_list(
+                payload.get("headlines"),
+                fallback_payload["headlines"],
+            ),
+            "primary_text_variants": self._clean_list(
+                payload.get("primary_text_variants"),
+                fallback_payload["primary_text_variants"],
+            ),
+            "ctas": self._clean_list(
+                payload.get("ctas"),
+                fallback_payload["ctas"],
+            ),
+            "channel_variants": normalized_channel_variants or fallback_payload["channel_variants"],
+            "design_brief": {
+                "layout_direction": str(
+                    design_brief.get("layout_direction")
+                    or fallback_payload["design_brief"]["layout_direction"]
+                ),
+                "asset_strategy": str(
+                    design_brief.get("asset_strategy")
+                    or fallback_payload["design_brief"]["asset_strategy"]
+                ),
+                "copy_hierarchy": self._clean_list(
+                    design_brief.get("copy_hierarchy"),
+                    fallback_payload["design_brief"]["copy_hierarchy"],
+                ),
+                "visual_notes": self._clean_list(
+                    design_brief.get("visual_notes"),
+                    fallback_payload["design_brief"]["visual_notes"],
+                ),
+            },
+            "video_brief": {
+                "concept": str(
+                    video_brief.get("concept")
+                    or fallback_payload["video_brief"]["concept"]
+                ),
+                "opening_shot": str(
+                    video_brief.get("opening_shot")
+                    or fallback_payload["video_brief"]["opening_shot"]
+                ),
+                "shot_list": self._clean_list(
+                    video_brief.get("shot_list"),
+                    fallback_payload["video_brief"]["shot_list"],
+                ),
+                "voiceover_script": str(
+                    video_brief.get("voiceover_script")
+                    or fallback_payload["video_brief"]["voiceover_script"]
+                ),
+                "end_frame": str(
+                    video_brief.get("end_frame")
+                    or fallback_payload["video_brief"]["end_frame"]
+                ),
+                "veo_prompt": str(
+                    video_brief.get("veo_prompt")
+                    or fallback_payload["video_brief"]["veo_prompt"]
+                ),
+            },
+            "production_checklist": self._clean_list(
+                payload.get("production_checklist"),
+                fallback_payload["production_checklist"],
+            ),
+        }
+
+    def _build_execution_fallback(
+        self,
+        *,
+        brand: Brand,
+        brief: dict[str, Any],
+        concept: dict[str, Any],
+        asset_context: list[dict[str, Any]],
+        selected_assets: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Produce a deterministic execution pack when LLM output is unavailable."""
+        brand_name = brand.name or brand.website_url
+        headlines = [
+            concept["hook"],
+            concept["name"],
+            f"{brand_name}: {concept['angle']}",
+            f"{brief.get('offer_summary') or brand_name}, without the clutter",
+        ]
+
+        primary_text_variants = [
+            concept["primary_text"],
+            (
+                f"{brand_name} turns {brief.get('audience_focus', 'buyer intent')} into a clearer "
+                f"path with {brief.get('offer_summary', 'a stronger offer')}."
+            ),
+            (
+                f"{concept['angle']} Lead with the proof, support it with the right asset, "
+                f"and close on {concept['cta']}."
+            ),
+        ]
+
+        ctas = [concept["cta"], "Learn More", "See It In Action", "Get Started"]
+        hero_asset = selected_assets[0]["description"] if selected_assets else "the strongest brand asset"
+        asset_line = (
+            f"Anchor the composition on {hero_asset}."
+            if selected_assets else
+            "Anchor the composition on the clearest usable product or brand asset."
+        )
+
+        channel_variants = [
+            {
+                "channel": "Meta Feed",
+                "format": concept["format"],
+                "headline": headlines[0],
+                "primary_text": primary_text_variants[0],
+                "cta": concept["cta"],
+            },
+            {
+                "channel": "Instagram Story",
+                "format": "story",
+                "headline": headlines[1],
+                "primary_text": primary_text_variants[1],
+                "cta": "Swipe Up",
+            },
+            {
+                "channel": "LinkedIn Sponsored",
+                "format": "single image",
+                "headline": headlines[2],
+                "primary_text": primary_text_variants[2],
+                "cta": "Book A Demo",
+            },
+        ]
+
+        voiceover_lines = [concept["hook"]]
+        voiceover_lines.extend(beat["detail"] for beat in concept.get("storyboard", [])[:3])
+        voiceover_lines.append(f"Close on {concept['cta']}.")
+
+        visual_notes = self._clean_list(concept.get("visual_direction"))[:4]
+        brief_visual_direction = self._clean_list(brief.get("visual_direction"))[:3]
+
+        asset_names = [
+            asset["description"] or asset["category"] or asset["id"]
+            for asset in selected_assets[:3]
+        ]
+        if not asset_names:
+            asset_names = [
+                asset["description"] or asset["category"] or asset["id"]
+                for asset in asset_context[:3]
+            ]
+
+        veo_prompt = (
+            f"Create a polished {concept['format']} ad for {brand_name}. "
+            f"Angle: {concept['angle']} Hook: {concept['hook']} "
+            f"Use these visual cues: {', '.join(brief_visual_direction or visual_notes or ['clean composition'])}. "
+            f"Reference these assets or motifs: {', '.join(asset_names or ['brand visuals'])}. "
+            f"End frame should feature the CTA '{concept['cta']}'."
+        )
+
+        return {
+            "summary": (
+                f"{concept['name']} is now expanded into copy, design, and video guidance "
+                f"for {brand_name}."
+            ),
+            "headlines": headlines,
+            "primary_text_variants": primary_text_variants,
+            "ctas": ctas,
+            "channel_variants": channel_variants,
+            "design_brief": {
+                "layout_direction": (
+                    f"Start with a high-contrast hero composition. {asset_line}"
+                ),
+                "asset_strategy": (
+                    "Use recommended assets first, then support with secondary proof visuals "
+                    "that match the concept format."
+                ),
+                "copy_hierarchy": [
+                    concept["hook"],
+                    brief.get("offer_summary") or concept["angle"],
+                    concept["cta"],
+                ],
+                "visual_notes": visual_notes or brief_visual_direction or [
+                    "Keep the frame clean and high-contrast.",
+                    "Use the brand palette instead of introducing new colors.",
+                ],
+            },
+            "video_brief": {
+                "concept": concept["name"],
+                "opening_shot": (
+                    concept.get("storyboard", [{}])[0].get("detail")
+                    if concept.get("storyboard")
+                    else concept["hook"]
+                ),
+                "shot_list": [
+                    beat["detail"] for beat in concept.get("storyboard", [])
+                ] or [concept["angle"], concept["hook"], concept["cta"]],
+                "voiceover_script": " ".join(voiceover_lines),
+                "end_frame": f"Show the brand lockup and CTA: {concept['cta']}.",
+                "veo_prompt": veo_prompt,
+            },
+            "production_checklist": [
+                "Confirm the hero asset for the selected concept.",
+                "Adapt one headline per channel before export.",
+                "Keep claims inside the current brand profile and selected concept.",
+                "Use the video brief as the base prompt for storyboard or VEO rendering.",
+            ],
+        }
+
     def _serialize_brand(self, brand: Brand) -> dict[str, Any]:
         """Return only the brand fields needed for creative generation."""
         return {
@@ -403,3 +688,108 @@ class CreativeStudioService:
             return list(fallback or [])
         normalized = [str(item).strip() for item in items if str(item).strip()]
         return normalized or list(fallback or [])
+
+    @staticmethod
+    def serialize_saved_execution(
+        record: CreativeExecutionRecord,
+    ) -> dict[str, Any]:
+        """Convert a persisted execution record into an API response."""
+        execution = dict(record.execution or {})
+        execution.setdefault("brand_id", record.brand_id)
+        execution.setdefault("concept_id", record.concept_id)
+        execution.setdefault("concept_name", record.concept_name)
+
+        return {
+            "id": record.id,
+            "brand_id": record.brand_id,
+            "concept_id": record.concept_id,
+            "concept_name": record.concept_name,
+            "summary": record.summary,
+            "delivery_mode": record.delivery_mode,
+            "status": record.status,
+            "destination_label": record.destination_label,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+            "brief": record.brief,
+            "concept": record.concept,
+            "execution": execution,
+        }
+
+    @staticmethod
+    def serialize_saved_execution_summary(
+        record: CreativeExecutionRecord,
+    ) -> dict[str, Any]:
+        """Return the lightweight listing shape for a saved execution."""
+        return {
+            "id": record.id,
+            "brand_id": record.brand_id,
+            "concept_id": record.concept_id,
+            "concept_name": record.concept_name,
+            "summary": record.summary,
+            "delivery_mode": record.delivery_mode,
+            "status": record.status,
+            "destination_label": record.destination_label,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+        }
+
+    @staticmethod
+    def build_export_document(
+        record: CreativeExecutionRecord,
+        export_format: str,
+    ) -> tuple[str, str, str]:
+        """Render a saved execution as a downloadable artifact."""
+        payload = CreativeStudioService.serialize_saved_execution(record)
+        execution = payload["execution"]
+
+        if export_format == "json":
+            content = json.dumps(payload, indent=2, default=str)
+            return content, "application/json", f"{record.concept_name}-execution.json"
+
+        lines = [
+            f"# {record.concept_name}",
+            "",
+            f"Brand: {record.brand.name if record.brand else record.brand_id}",
+            f"Delivery mode: {record.delivery_mode}",
+            f"Status: {record.status}",
+            "",
+            "## Summary",
+            record.summary,
+            "",
+            "## Headlines",
+            *[f"- {item}" for item in execution.get("headlines", [])],
+            "",
+            "## Primary Text Variants",
+            *[f"- {item}" for item in execution.get("primary_text_variants", [])],
+            "",
+            "## CTA Options",
+            *[f"- {item}" for item in execution.get("ctas", [])],
+            "",
+            "## Design Brief",
+            f"- Layout direction: {execution.get('design_brief', {}).get('layout_direction', '')}",
+            f"- Asset strategy: {execution.get('design_brief', {}).get('asset_strategy', '')}",
+            *[
+                f"- {item}"
+                for item in execution.get("design_brief", {}).get("visual_notes", [])
+            ],
+            "",
+            "## Video Brief",
+            f"- Opening shot: {execution.get('video_brief', {}).get('opening_shot', '')}",
+            f"- End frame: {execution.get('video_brief', {}).get('end_frame', '')}",
+            "",
+            "### Voiceover Script",
+            execution.get("video_brief", {}).get("voiceover_script", ""),
+            "",
+            "### VEO Prompt",
+            execution.get("video_brief", {}).get("veo_prompt", ""),
+            "",
+            "## Production Checklist",
+            *[f"- {item}" for item in execution.get("production_checklist", [])],
+        ]
+
+        if export_format == "txt":
+            content = "\n".join(line for line in lines if line is not None)
+            return content, "text/plain; charset=utf-8", f"{record.concept_name}-execution.txt"
+
+        content = "\n".join(line for line in lines if line is not None)
+        return content, "text/markdown; charset=utf-8", f"{record.concept_name}-execution.md"
