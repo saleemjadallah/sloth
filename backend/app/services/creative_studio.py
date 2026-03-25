@@ -19,6 +19,8 @@ class CreativeStudioService:
     """Generates a creative brief and concepts for a brand."""
 
     _CATEGORY_PRIORITY = {
+        "generated": 6,
+        "ai-generated": 6,
         "product": 5,
         "ui": 5,
         "screenshot": 4,
@@ -74,7 +76,10 @@ class CreativeStudioService:
         concept: CreativeConcept,
     ) -> dict[str, Any]:
         """Expand a selected concept into copy, design, and video outputs."""
-        asset_context = self._serialize_assets(brand)
+        asset_context = self._serialize_assets(
+            brand,
+            preferred_asset_ids=set(concept.asset_ids),
+        )
         selected_assets = [
             asset for asset in asset_context if asset["id"] in set(concept.asset_ids)
         ]
@@ -650,11 +655,17 @@ class CreativeStudioService:
             "products": brand.products or [],
         }
 
-    def _serialize_assets(self, brand: Brand) -> list[dict[str, Any]]:
+    def _serialize_assets(
+        self,
+        brand: Brand,
+        preferred_asset_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """Prepare the highest-signal asset set for prompting and UI mapping."""
         assets = list(brand.assets or [])
+        preferred_asset_ids = preferred_asset_ids or set()
         assets.sort(
             key=lambda asset: (
+                0 if str(asset.id) in preferred_asset_ids else 1,
                 0 if asset.is_usable else 1,
                 -self._CATEGORY_PRIORITY.get((asset.category or "").lower(), 0),
                 -(asset.quality_score or 0),
@@ -663,7 +674,8 @@ class CreativeStudioService:
         )
 
         serialized = []
-        for asset in assets[:8]:
+        max_assets = max(8, len(preferred_asset_ids) + 8)
+        for asset in assets[:max_assets]:
             serialized.append(
                 {
                     "id": str(asset.id),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Sequence
 
 import httpx
@@ -22,6 +23,7 @@ from app.models.creative_execution import CreativeExecution
 from app.schemas.brand import (
     BrandAnalyzeRequest,
     BrandAssetResponse,
+    BrandAssetVariationRequest,
     BrandListItem,
     BrandProfile,
     BrandUpdate,
@@ -42,6 +44,7 @@ from app.services.asset_extractor import AssetExtractor
 from app.services.brand_analysis import BrandAnalysisService
 from app.services.creative_studio import CreativeStudioService
 from app.services.firecrawl_service import FirecrawlService
+from app.services.image_variation import ImageVariationService
 from app.services.late_service import LateService
 from app.services.llm_service import LLMService
 
@@ -72,6 +75,16 @@ def _get_creative_studio_service() -> CreativeStudioService:
     if settings.ANTHROPIC_API_KEY:
         llm = LLMService(anthropic_api_key=settings.ANTHROPIC_API_KEY)
     return CreativeStudioService(llm_service=llm)
+
+
+def _get_image_variation_service() -> ImageVariationService:
+    """Build the Gemini-powered asset variation service."""
+    if not settings.GOOGLE_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Image variation is not configured. Set GOOGLE_API_KEY.",
+        )
+    return ImageVariationService(api_key=settings.GOOGLE_API_KEY)
 
 
 def _get_late_service() -> LateService:
@@ -581,6 +594,100 @@ async def get_brand_assets(
     query = query.order_by(BrandAsset.quality_score.desc().nulls_last())
     result = await db.execute(query)
     return result.scalars().all()
+
+
+@router.post(
+    "/{brand_id}/assets/{asset_id}/variations",
+    response_model=list[BrandAssetResponse],
+    status_code=status.HTTP_201_CREATED,
+    summary="Generate prompted visual variations from an existing asset",
+)
+async def create_brand_asset_variations(
+    brand_id: uuid.UUID,
+    asset_id: uuid.UUID,
+    body: BrandAssetVariationRequest,
+    db: AsyncSession = Depends(get_db),
+) -> Sequence[BrandAsset]:
+    """Create AI-generated brand assets derived from an existing source asset."""
+    await _get_brand_or_404(brand_id, db)
+    source_asset = await db.get(BrandAsset, asset_id)
+    if source_asset is None or source_asset.brand_id != brand_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Asset {asset_id} not found for brand {brand_id}.",
+        )
+    if not source_asset.stored_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Selected asset is missing a stored image and cannot be used for variation generation.",
+        )
+
+    try:
+        source_bytes = Path(source_asset.stored_url).read_bytes()
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not read source asset from disk: {exc}",
+        ) from exc
+
+    service = _get_image_variation_service()
+
+    try:
+        outputs = await service.create_variation(
+            source_bytes=source_bytes,
+            source_mime_type=source_asset.mime_type or "image/png",
+            prompt=body.prompt,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Asset variation generation failed for brand %s asset %s",
+            brand_id,
+            asset_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Asset variation generation failed: {exc}",
+        ) from exc
+
+    created_assets: list[BrandAsset] = []
+    for output in outputs:
+        stored = service.save_generated_image(
+            brand_id=str(brand_id),
+            image_bytes=output["bytes"],
+            mime_type=output["mime_type"],
+        )
+        asset = BrandAsset(
+            brand_id=brand_id,
+            source_url=f"generated://{source_asset.id}",
+            source_page=source_asset.source_page,
+            stored_url=stored["stored_url"],
+            file_name=stored["file_name"],
+            file_size=stored["file_size"],
+            mime_type=stored["mime_type"],
+            width=stored["width"],
+            height=stored["height"],
+            category=source_asset.category or "generated",
+            description=f"AI variation of {source_asset.description or source_asset.category or 'brand asset'}",
+            tags=["ai-generated", "nano-banana-pro"],
+            quality_score=max(source_asset.quality_score or 7, 8),
+            is_usable=True,
+            alt_text=source_asset.alt_text,
+            context=body.prompt,
+            extraction_metadata={
+                "generation_model": ImageVariationService.DEFAULT_MODEL,
+                "generation_prompt": body.prompt,
+                "source_asset_id": str(source_asset.id),
+                "source_stored_url": source_asset.stored_url,
+                "source_source_url": source_asset.source_url,
+            },
+        )
+        db.add(asset)
+        created_assets.append(asset)
+
+    await db.flush()
+    for asset in created_assets:
+        await db.refresh(asset)
+    return created_assets
 
 
 @router.put(

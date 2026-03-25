@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 
 # ── Request schemas ─────────────────────────────────────────────────────
@@ -14,6 +14,12 @@ class BrandAnalyzeRequest(BaseModel):
     """Body for POST /brands/analyze."""
 
     website_url: HttpUrl
+
+
+class BrandAssetVariationRequest(BaseModel):
+    """Request body for generating a prompted variation from an existing asset."""
+
+    prompt: str = Field(min_length=5, max_length=2_000)
 
 
 # ── Nested value objects ────────────────────────────────────────────────
