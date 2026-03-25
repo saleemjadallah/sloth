@@ -58,6 +58,59 @@ Website content (markdown):
 {markdown_content}
 """
 
+CREATIVE_SYSTEM_PROMPT = """\
+You are a performance creative strategist. You turn structured brand inputs \
+into concrete ad concepts that a marketing team can immediately produce.
+
+Always respond with a single JSON object and no surrounding commentary. \
+Stay grounded in the supplied brand profile and listed assets. Do not invent \
+social proof, product capabilities, or brand claims that are not supported \
+by the input."""
+
+CREATIVE_USER_PROMPT_TEMPLATE = """\
+Create {concept_count} paid-media ad concepts for this brand. Return a JSON \
+object with these exact keys:
+
+{{
+  "summary": "string",
+  "brief": {{
+    "primary_goal": "string",
+    "audience_focus": "string",
+    "offer_summary": "string",
+    "messaging_pillars": ["list"],
+    "tone_guardrails": ["list"],
+    "visual_direction": ["list"],
+    "recommended_formats": ["list"]
+  }},
+  "concepts": [
+    {{
+      "id": "concept-1",
+      "name": "string",
+      "format": "string",
+      "angle": "string",
+      "hook": "string",
+      "primary_text": "string",
+      "cta": "string",
+      "why_it_will_work": "string",
+      "visual_direction": ["list"],
+      "asset_ids": ["use only IDs from the provided asset list"],
+      "storyboard": [
+        {{
+          "step": "string",
+          "detail": "string"
+        }}
+      ]
+    }}
+  ]
+}}
+
+Brand profile:
+{brand_json}
+
+Available assets:
+{asset_json}
+"""
+
 
 class LLMService:
     """Wraps the Anthropic SDK for brand-analysis tasks."""
@@ -101,6 +154,24 @@ class LLMService:
 
     # ── public API ──────────────────────────────────────────────────────
 
+    async def _request_json(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
+        max_tokens: int = 4096,
+    ) -> dict[str, Any]:
+        """Send a prompt and parse the response as JSON."""
+        response = await self._client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=max_tokens,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+        )
+
+        raw_text = response.content[0].text
+        return self._extract_json(raw_text)
+
     async def analyze_brand(
         self,
         website_url: str,
@@ -135,17 +206,37 @@ class LLMService:
         )
 
         try:
-            response = await self._client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=4096,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_message}],
+            return await self._request_json(
+                system_prompt=SYSTEM_PROMPT,
+                user_message=user_message,
             )
-
-            raw_text = response.content[0].text
-            analysis = self._extract_json(raw_text)
-            return analysis
 
         except Exception:
             logger.exception("LLM brand analysis failed for %s", website_url)
+            raise
+
+    async def generate_creative_studio(
+        self,
+        brand_context: dict[str, Any],
+        asset_context: list[dict[str, Any]],
+        concept_count: int,
+    ) -> dict[str, Any]:
+        """Generate a creative brief and concept set from a brand profile."""
+        user_message = CREATIVE_USER_PROMPT_TEMPLATE.format(
+            concept_count=concept_count,
+            brand_json=json.dumps(brand_context, indent=2),
+            asset_json=json.dumps(asset_context, indent=2),
+        )
+
+        try:
+            return await self._request_json(
+                system_prompt=CREATIVE_SYSTEM_PROMPT,
+                user_message=user_message,
+                max_tokens=5000,
+            )
+        except Exception:
+            logger.exception(
+                "LLM creative studio generation failed for brand %s",
+                brand_context.get("id", "unknown"),
+            )
             raise

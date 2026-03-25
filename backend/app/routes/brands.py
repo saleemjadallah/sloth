@@ -9,6 +9,7 @@ from typing import Sequence
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database import get_db
@@ -21,9 +22,11 @@ from app.schemas.brand import (
     BrandProfile,
     BrandUpdate,
 )
+from app.schemas.creative import CreativeStudioResponse
 from app.services.asset_classifier import AssetClassifier
 from app.services.asset_extractor import AssetExtractor
 from app.services.brand_analysis import BrandAnalysisService
+from app.services.creative_studio import CreativeStudioService
 from app.services.firecrawl_service import FirecrawlService
 from app.services.llm_service import LLMService
 
@@ -48,12 +51,30 @@ def _get_analysis_service() -> BrandAnalysisService:
     )
 
 
+def _get_creative_studio_service() -> CreativeStudioService:
+    """Build the creative studio service with optional LLM support."""
+    llm = None
+    if settings.ANTHROPIC_API_KEY:
+        llm = LLMService(anthropic_api_key=settings.ANTHROPIC_API_KEY)
+    return CreativeStudioService(llm_service=llm)
+
+
 async def _get_brand_or_404(
     brand_id: uuid.UUID,
     db: AsyncSession,
+    *,
+    with_assets: bool = False,
 ) -> Brand:
     """Fetch a brand by ID or raise 404."""
-    brand = await db.get(Brand, brand_id)
+    if with_assets:
+        result = await db.execute(
+            select(Brand)
+            .options(selectinload(Brand.assets))
+            .where(Brand.id == brand_id)
+        )
+        brand = result.scalar_one_or_none()
+    else:
+        brand = await db.get(Brand, brand_id)
     if brand is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -163,7 +184,23 @@ async def get_brand(
     brand_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ) -> Brand:
-    return await _get_brand_or_404(brand_id, db)
+    return await _get_brand_or_404(brand_id, db, with_assets=True)
+
+
+@router.get(
+    "/{brand_id}/creative-studio",
+    response_model=CreativeStudioResponse,
+    summary="Generate a creative brief and ad concepts for a brand",
+)
+async def get_brand_creative_studio(
+    brand_id: uuid.UUID,
+    concept_count: int = Query(4, ge=2, le=6, description="Number of concepts"),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """Build a creative brief and concept set from the stored brand profile."""
+    brand = await _get_brand_or_404(brand_id, db, with_assets=True)
+    service = _get_creative_studio_service()
+    return await service.build_studio(brand=brand, concept_count=concept_count)
 
 
 @router.get(

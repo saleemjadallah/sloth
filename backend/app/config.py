@@ -20,6 +20,16 @@ class Settings(BaseSettings):
         "postgresql+asyncpg://postgres:postgres@localhost:5432/sloth"
     )
 
+    @field_validator("DATABASE_URL", mode="after")
+    @classmethod
+    def _fix_db_scheme(cls, v: str) -> str:
+        """Railway gives ``postgresql://`` – swap to ``postgresql+asyncpg://``."""
+        if v.startswith("postgresql://"):
+            v = v.replace("postgresql://", "postgresql+asyncpg://", 1)
+        elif v.startswith("postgres://"):
+            v = v.replace("postgres://", "postgresql+asyncpg://", 1)
+        return v
+
     # ── Redis ───────────────────────────────────────────────────────────
     REDIS_URL: str = "redis://localhost:6379"
 
