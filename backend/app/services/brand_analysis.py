@@ -165,6 +165,50 @@ class BrandAnalysisService:
     # ── merge ─────────────────────────────────────────────────────────────
 
     @staticmethod
+    def _pick_string(value: Any) -> str | None:
+        """Return the first non-empty string from a scalar or sequence."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                picked = BrandAnalysisService._pick_string(item)
+                if picked:
+                    return picked
+            return None
+        return str(value)
+
+    @classmethod
+    def _normalize_colors(cls, colors: Any) -> dict[str, str] | None:
+        """Normalize palette values to simple strings for API/storage safety."""
+        if not isinstance(colors, dict):
+            return None
+
+        normalized = {
+            key: picked
+            for key in ("primary", "secondary", "accent")
+            if (picked := cls._pick_string(colors.get(key)))
+        }
+
+        return normalized or None
+
+    @classmethod
+    def _normalize_fonts(cls, fonts: Any) -> dict[str, str] | None:
+        """Normalize font values to simple strings for API/storage safety."""
+        if not isinstance(fonts, dict):
+            return None
+
+        normalized = {
+            key: picked
+            for key in ("heading", "body")
+            if (picked := cls._pick_string(fonts.get(key)))
+        }
+
+        return normalized or None
+
+    @staticmethod
     def _merge(
         branding: dict[str, Any],
         llm: dict[str, Any],
@@ -174,9 +218,18 @@ class BrandAnalysisService:
         Scraped visual data (colors, fonts, logo) takes precedence when
         present because it comes from the actual rendered page.
         """
-        colors = branding.get("colors") or llm.get("colors") or {}
-        fonts = branding.get("fonts") or llm.get("fonts") or {}
-        logo_url = branding.get("logo") or llm.get("logo_url")
+        colors = (
+            BrandAnalysisService._normalize_colors(branding.get("colors"))
+            or BrandAnalysisService._normalize_colors(llm.get("colors"))
+        )
+        fonts = (
+            BrandAnalysisService._normalize_fonts(branding.get("fonts"))
+            or BrandAnalysisService._normalize_fonts(llm.get("fonts"))
+        )
+        logo_url = (
+            BrandAnalysisService._pick_string(branding.get("logo"))
+            or BrandAnalysisService._pick_string(llm.get("logo_url"))
+        )
 
         return {
             "name": llm.get("company_name", ""),

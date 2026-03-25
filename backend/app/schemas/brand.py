@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, HttpUrl
+from pydantic import BaseModel, ConfigDict, HttpUrl, field_validator
 
 
 # ── Request schemas ─────────────────────────────────────────────────────
@@ -23,10 +23,40 @@ class BrandColors(BaseModel):
     secondary: str | None = None
     accent: str | None = None
 
+    @field_validator("primary", "secondary", "accent", mode="before")
+    @classmethod
+    def _coerce_color_value(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                if isinstance(item, str) and item.strip():
+                    return item.strip()
+            return None
+        return str(value)
+
 
 class BrandFonts(BaseModel):
     heading: str | None = None
     body: str | None = None
+
+    @field_validator("heading", "body", mode="before")
+    @classmethod
+    def _coerce_font_value(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                if isinstance(item, str) and item.strip():
+                    return item.strip()
+            return None
+        return str(value)
 
 
 class BrandVoice(BaseModel):
