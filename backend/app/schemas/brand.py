@@ -22,6 +22,13 @@ class BrandAssetVariationRequest(BaseModel):
     prompt: str = Field(min_length=5, max_length=2_000)
 
 
+class BrandAssetGenerateRequest(BaseModel):
+    """Request body for generating brand-fit assets from brand context."""
+
+    prompt: str = Field(default="", max_length=2_000)
+    count: int = Field(default=1, ge=1, le=4)
+
+
 # ── Nested value objects ────────────────────────────────────────────────
 
 class BrandColors(BaseModel):
