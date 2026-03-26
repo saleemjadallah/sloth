@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response
 from sqlalchemy import delete, select
@@ -23,6 +25,7 @@ from app.models.brand_asset import BrandAsset
 from app.models.creative_execution import CreativeExecution
 from app.schemas.brand import (
     BrandAnalyzeRequest,
+    BrandAssetGenerateRequest,
     BrandAssetResponse,
     BrandAssetVariationRequest,
     BrandListItem,
@@ -140,6 +143,147 @@ def _coerce_asset_tags(value: object) -> list[str] | None:
         return [stripped] if stripped else None
     rendered = str(value).strip()
     return [rendered] if rendered else None
+
+
+def _clean_prompt_parts(values: object, *, limit: int | None = None) -> list[str]:
+    """Normalize list-like prompt inputs to trimmed strings."""
+    if isinstance(values, list):
+        items = [str(item).strip() for item in values if str(item).strip()]
+    elif values is None:
+        items = []
+    else:
+        text = str(values).strip()
+        items = [text] if text else []
+
+    return items[:limit] if limit else items
+
+
+def _summarize_brand_generation_prompt(brand: Brand, user_prompt: str) -> str:
+    """Build a brand-context prompt for first-class asset generation."""
+    voice = brand.voice or {}
+    audience = brand.target_audience or {}
+    colors = brand.colors or {}
+    products = brand.products or []
+
+    product_lines: list[str] = []
+    for product in products[:3]:
+        if not isinstance(product, dict):
+            continue
+        name = str(product.get("name") or "").strip()
+        description = str(product.get("description") or "").strip()
+        benefits = _clean_prompt_parts(product.get("key_benefits"), limit=3)
+        if not name and not description and not benefits:
+            continue
+        detail_parts = [part for part in [name, description] if part]
+        if benefits:
+            detail_parts.append(f"benefits: {', '.join(benefits)}")
+        product_lines.append("; ".join(detail_parts))
+
+    palette = [
+        f"{label} {value}".strip()
+        for label, value in (
+            ("primary", colors.get("primary")),
+            ("secondary", colors.get("secondary")),
+            ("accent", colors.get("accent")),
+        )
+        if value
+    ]
+    value_props = _clean_prompt_parts(brand.value_propositions, limit=4)
+    pain_points = _clean_prompt_parts(audience.get("pain_points"), limit=3)
+    desires = _clean_prompt_parts(audience.get("desires"), limit=3)
+
+    prompt_parts = [
+        f"Brand: {brand.name}.",
+        f"Website: {brand.website_url}.",
+        f"Industry: {brand.industry}." if brand.industry else "",
+        (
+            f"Voice and style: tone {voice.get('tone') or 'clear'}, style {voice.get('style') or 'confident'}."
+            if voice
+            else ""
+        ),
+        f"Brand palette: {', '.join(palette)}." if palette else "",
+        f"Value propositions: {', '.join(value_props)}." if value_props else "",
+        f"Target audience: {audience.get('demographics')}." if audience.get("demographics") else "",
+        f"Audience pain points: {', '.join(pain_points)}." if pain_points else "",
+        f"Audience desires: {', '.join(desires)}." if desires else "",
+        f"Products or offers: {' | '.join(product_lines)}." if product_lines else "",
+        (
+            "Create a high-quality ad image that feels native to the brand and useful inside paid social creative workflows."
+        ),
+        (
+            "If the business is not product-led, generate a strong service, lifestyle, editorial, or UI-led hero visual that still feels brand-specific."
+        ),
+        user_prompt.strip() and f"Additional creative direction: {user_prompt.strip()}.",
+    ]
+    return " ".join(part for part in prompt_parts if part)
+
+
+def _guess_upload_content_type(upload: UploadFile) -> str:
+    """Best-effort content-type detection for uploaded assets."""
+    if upload.content_type and upload.content_type != "application/octet-stream":
+        return upload.content_type
+    return mimetypes.guess_type(upload.filename or "")[0] or "application/octet-stream"
+
+
+def _is_supported_uploaded_asset(content_type: str) -> bool:
+    """Return True for media types the studio can use directly."""
+    return content_type.startswith("image/") or content_type.startswith("video/")
+
+
+def _describe_uploaded_asset(upload: UploadFile) -> str:
+    """Turn an uploaded file name into a UI-friendly description."""
+    raw_name = Path(upload.filename or "uploaded asset").stem.replace("_", " ").replace("-", " ")
+    return " ".join(raw_name.split()) or "Uploaded brand asset"
+
+
+async def _persist_brand_asset(
+    *,
+    db: AsyncSession,
+    brand_id: uuid.UUID,
+    storage: AssetStorage,
+    source_url: str,
+    source_page: str | None = None,
+    file_name: str,
+    file_bytes: bytes,
+    mime_type: str,
+    width: int | None = None,
+    height: int | None = None,
+    category: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    quality_score: int | None = None,
+    is_usable: bool = True,
+    alt_text: str | None = None,
+    context: str | None = None,
+    extraction_metadata: dict[str, object] | None = None,
+) -> BrandAsset:
+    """Persist a generated or uploaded asset into shared storage and the DB."""
+    stored_url = await storage.save_asset(
+        key=storage.build_key(str(brand_id), file_name),
+        data=file_bytes,
+        content_type=mime_type,
+    )
+    asset = BrandAsset(
+        brand_id=brand_id,
+        source_url=source_url,
+        source_page=source_page,
+        stored_url=stored_url,
+        file_name=file_name,
+        file_size=len(file_bytes),
+        mime_type=mime_type,
+        width=width,
+        height=height,
+        category=category,
+        description=description,
+        tags=tags,
+        quality_score=quality_score,
+        is_usable=is_usable,
+        alt_text=alt_text,
+        context=context,
+        extraction_metadata=extraction_metadata,
+    )
+    db.add(asset)
+    return asset
 
 
 def _is_public_http_url(value: str | None) -> bool:
@@ -1091,6 +1235,138 @@ async def get_brand_assets(
 
 
 @router.post(
+    "/{brand_id}/assets/generate",
+    response_model=list[BrandAssetResponse],
+    status_code=status.HTTP_201_CREATED,
+    summary="Generate brand-fit visuals from the brand context",
+)
+async def generate_brand_assets(
+    brand_id: uuid.UUID,
+    body: BrandAssetGenerateRequest,
+    db: AsyncSession = Depends(get_db),
+) -> Sequence[BrandAsset]:
+    """Create new AI-generated assets directly from brand strategy and product data."""
+    brand = await _get_brand_or_404(brand_id, db)
+    service = _get_image_variation_service()
+    storage = AssetStorage.from_settings()
+    prompt = _summarize_brand_generation_prompt(brand, body.prompt)
+
+    try:
+        outputs = await service.create_brand_assets(prompt=prompt, count=body.count)
+    except Exception as exc:
+        logger.exception("Brand asset generation failed for brand %s", brand_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Brand image generation failed: {exc}",
+        ) from exc
+
+    created_assets: list[BrandAsset] = []
+    for index, output in enumerate(outputs, start=1):
+        extension = {
+            "image/png": ".png",
+            "image/webp": ".webp",
+            "image/jpeg": ".jpg",
+            "image/jpg": ".jpg",
+        }.get(output["mime_type"].lower(), ".png")
+        file_name = f"generated-brand-{uuid.uuid4().hex[:12]}-{index}{extension}"
+        asset = await _persist_brand_asset(
+            db=db,
+            brand_id=brand_id,
+            storage=storage,
+            source_url="generated://brand-prompt",
+            file_name=file_name,
+            file_bytes=output["bytes"],
+            mime_type=output["mime_type"],
+            width=output["width"],
+            height=output["height"],
+            category="generated",
+            description=f"AI-generated brand visual for {brand.name}",
+            tags=["ai-generated", "brand-generated", "main-feature"],
+            quality_score=9,
+            is_usable=True,
+            context=body.prompt.strip() or None,
+            extraction_metadata={
+                "generation_model": ImageVariationService.DEFAULT_MODEL,
+                "generation_prompt": prompt,
+                "requested_count": body.count,
+            },
+        )
+        created_assets.append(asset)
+
+    await db.flush()
+    for asset in created_assets:
+        await db.refresh(asset)
+    return created_assets
+
+
+@router.post(
+    "/{brand_id}/assets/upload",
+    response_model=list[BrandAssetResponse],
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload brand assets directly into the project",
+)
+async def upload_brand_assets(
+    brand_id: uuid.UUID,
+    files: list[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_db),
+) -> Sequence[BrandAsset]:
+    """Persist uploaded image/video assets so they can be used inside Creative Studio."""
+    await _get_brand_or_404(brand_id, db)
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Attach at least one file to upload brand assets.",
+        )
+
+    storage = AssetStorage.from_settings()
+    created_assets: list[BrandAsset] = []
+
+    for upload in files:
+        content_type = _guess_upload_content_type(upload)
+        if not _is_supported_uploaded_asset(content_type):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{upload.filename or 'Uploaded file'} must be an image or video asset.",
+            )
+
+        data = await upload.read()
+        if not data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{upload.filename or 'Uploaded file'} is empty.",
+            )
+
+        suffix = Path(upload.filename or "").suffix
+        guessed_suffix = mimetypes.guess_extension(content_type) or ""
+        file_name = f"uploaded-{uuid.uuid4().hex[:12]}{suffix or guessed_suffix}"
+        asset = await _persist_brand_asset(
+            db=db,
+            brand_id=brand_id,
+            storage=storage,
+            source_url=f"uploaded://{upload.filename or file_name}",
+            file_name=file_name,
+            file_bytes=data,
+            mime_type=content_type,
+            category="uploaded",
+            description=_describe_uploaded_asset(upload),
+            tags=["uploaded", "user-provided"],
+            quality_score=9 if content_type.startswith("image/") else 8,
+            is_usable=True,
+            extraction_metadata={
+                "upload_name": upload.filename or file_name,
+                "content_type": content_type,
+                "upload_source": "creative-studio",
+            },
+        )
+        created_assets.append(asset)
+
+    await db.flush()
+    for asset in created_assets:
+        await db.refresh(asset)
+    return created_assets
+
+
+@router.post(
     "/{brand_id}/assets/{asset_id}/variations",
     response_model=list[BrandAssetResponse],
     status_code=status.HTTP_201_CREATED,
@@ -1157,18 +1433,14 @@ async def create_brand_asset_variations(
             "image/jpg": ".jpg",
         }.get(output["mime_type"].lower(), ".png")
         file_name = f"generated-{uuid.uuid4().hex[:12]}{extension}"
-        stored_url = await storage.save_asset(
-            key=storage.build_key(str(brand_id), file_name),
-            data=output["bytes"],
-            content_type=output["mime_type"],
-        )
-        asset = BrandAsset(
+        asset = await _persist_brand_asset(
+            db=db,
             brand_id=brand_id,
+            storage=storage,
             source_url=f"generated://{source_asset.id}",
             source_page=source_asset.source_page,
-            stored_url=stored_url,
             file_name=file_name,
-            file_size=len(output["bytes"]),
+            file_bytes=output["bytes"],
             mime_type=output["mime_type"],
             width=output["width"],
             height=output["height"],
@@ -1187,7 +1459,6 @@ async def create_brand_asset_variations(
                 "source_source_url": source_asset.source_url,
             },
         )
-        db.add(asset)
         created_assets.append(asset)
 
     await db.flush()

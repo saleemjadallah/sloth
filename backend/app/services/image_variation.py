@@ -50,33 +50,39 @@ class ImageVariationService:
             ],
         )
 
-        results: list[dict[str, Any]] = []
-        for part in self._iter_response_parts(response):
-            inline_data = getattr(part, "inline_data", None)
-            if inline_data is None:
-                continue
-
-            data = getattr(inline_data, "data", None)
-            if not data:
-                continue
-            if isinstance(data, str):
-                data = base64.b64decode(data)
-
-            mime_type = getattr(inline_data, "mime_type", None) or "image/png"
-            width, height = self._get_image_dimensions(data)
-            results.append(
-                {
-                    "bytes": data,
-                    "mime_type": mime_type,
-                    "width": width,
-                    "height": height,
-                }
-            )
+        results = self._extract_images(response)
 
         if not results:
             raise RuntimeError("Gemini returned no image output for the requested variation.")
 
         return results
+
+    async def create_brand_assets(
+        self,
+        *,
+        prompt: str,
+        count: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Generate net-new brand visuals from text-only creative direction."""
+        responses = await asyncio.gather(
+            *[
+                asyncio.to_thread(
+                    self._client.models.generate_content,
+                    model=self._model,
+                    contents=[self._build_generation_prompt(prompt)],
+                )
+                for _ in range(max(1, count))
+            ]
+        )
+
+        results: list[dict[str, Any]] = []
+        for response in responses:
+            results.extend(self._extract_images(response))
+
+        if not results:
+            raise RuntimeError("Gemini returned no image output for the requested generation.")
+
+        return results[:count]
 
     def save_generated_image(
         self,
@@ -116,6 +122,17 @@ class ImageVariationService:
         )
 
     @staticmethod
+    def _build_generation_prompt(user_prompt: str) -> str:
+        return (
+            "Create a polished, campaign-ready marketing visual for this brand. "
+            "Use the supplied brand context to make the output feel specific, premium, and conversion-oriented. "
+            "If the brand is service-led or software-led, generate a branded lifestyle, interface, or hero-style scene instead of a physical product packshot. "
+            "Avoid watermarks and avoid heavy text overlays unless explicitly requested. "
+            "Return only the generated image. "
+            f"Brand direction: {user_prompt.strip()}"
+        )
+
+    @staticmethod
     def _iter_response_parts(response: Any) -> list[Any]:
         if getattr(response, "parts", None):
             return list(response.parts)
@@ -126,6 +143,32 @@ class ImageVariationService:
 
         content = getattr(candidates[0], "content", None)
         return list(getattr(content, "parts", None) or [])
+
+    @classmethod
+    def _extract_images(cls, response: Any) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for part in cls._iter_response_parts(response):
+            inline_data = getattr(part, "inline_data", None)
+            if inline_data is None:
+                continue
+
+            data = getattr(inline_data, "data", None)
+            if not data:
+                continue
+            if isinstance(data, str):
+                data = base64.b64decode(data)
+
+            mime_type = getattr(inline_data, "mime_type", None) or "image/png"
+            width, height = cls._get_image_dimensions(data)
+            results.append(
+                {
+                    "bytes": data,
+                    "mime_type": mime_type,
+                    "width": width,
+                    "height": height,
+                }
+            )
+        return results
 
     @staticmethod
     def _get_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
