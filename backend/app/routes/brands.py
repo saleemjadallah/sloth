@@ -502,6 +502,7 @@ async def analyze_brand(
                 alt_text=asset_data.get("alt_text"),
                 context=asset_data.get("context"),
                 extraction_metadata={
+                    **(asset_data.get("extraction_metadata") or {}),
                     "suggested_ad_use": asset_data.get("suggested_ad_use"),
                 },
             )

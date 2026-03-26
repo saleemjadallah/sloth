@@ -137,7 +137,7 @@ class BrandAnalysisService:
             return await self._asset_extractor.extract_assets(
                 website_url=website_url,
                 brand_id=brand_id or "temp",
-                max_pages=10,
+                max_pages=16,
             )
         except Exception as exc:
             logger.exception("Asset extraction failed for %s", website_url)

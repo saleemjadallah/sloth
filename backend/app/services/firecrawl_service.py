@@ -23,7 +23,8 @@ class FirecrawlService:
         """Run the blocking Firecrawl call (executed in a thread)."""
         return self._app.scrape_url(
             url,
-            params={"formats": ["markdown", "screenshot"]},
+            formats=["markdown", "html", "screenshot"],
+            only_main_content=False,
         )
 
     # ── public API ──────────────────────────────────────────────────────

@@ -1,10 +1,10 @@
 """Extract, download, and classify visual assets from a website.
 
 This service:
-1. Uses Firecrawl to crawl multiple pages and discover all images
-2. Filters for high-quality, ad-usable images (skips tiny icons, tracking pixels, etc.)
+1. Uses Firecrawl to crawl multiple pages and discover visual assets
+2. Filters obvious junk while preserving meaningful low-signal assets
 3. Downloads assets to local storage (or R2 in production)
-4. Uses an LLM to classify and describe each asset for ad creation
+4. Prepares fallback metadata for assets that should remain visible in the UI
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import hashlib
 import io
 import logging
 import mimetypes
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -30,16 +29,26 @@ logger = logging.getLogger(__name__)
 # Minimum dimensions for an image to be considered usable for ads
 MIN_USABLE_WIDTH = 200
 MIN_USABLE_HEIGHT = 200
+MIN_FALLBACK_WIDTH = 96
+MIN_FALLBACK_HEIGHT = 96
+MIN_USABLE_BYTES = 1000
+MIN_FALLBACK_BYTES = 300
 # Skip common non-content image patterns
 SKIP_PATTERNS = re.compile(
     r"(tracking|pixel|spacer|blank|1x1|beacon|analytics"
     r"|facebook\.com/tr|google-analytics|doubleclick"
-    r"|\.svg$|\.ico$|favicon|spinner|loader|arrow|chevron"
+    r"|\.ico$|favicon|spinner|loader|arrow|chevron"
     r"|data:image/(?:gif|png);base64,[\w+/=]{0,200}$)",  # tiny inline data URIs
     re.IGNORECASE,
 )
+# Assets with these signals are worth keeping even when small or low quality.
+MEANINGFUL_ASSET_PATTERNS = re.compile(
+    r"(logo|brand|hero|banner|cover|team|staff|founder|office|clinic|studio|interior|exterior"
+    r"|portfolio|project|case-study|service|work|testimonial|location|about|product)",
+    re.IGNORECASE,
+)
 # File extensions we care about
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif", ".bmp", ".tiff"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif", ".bmp", ".tiff", ".svg"}
 
 
 class AssetExtractor:
@@ -59,7 +68,7 @@ class AssetExtractor:
         self,
         website_url: str,
         brand_id: str,
-        max_pages: int = 10,
+        max_pages: int = 16,
     ) -> list[dict[str, Any]]:
         """Crawl a website, discover images, download and prepare them.
 
@@ -135,8 +144,10 @@ class AssetExtractor:
         parsed = urlparse(website_url)
         base = f"{parsed.scheme}://{parsed.netloc}"
         common_paths = [
-            "", "/about", "/products", "/services", "/shop",
-            "/gallery", "/portfolio", "/team", "/pricing",
+            "", "/about", "/about-us", "/services", "/service",
+            "/work", "/projects", "/portfolio", "/case-studies",
+            "/gallery", "/team", "/locations", "/contact", "/pricing",
+            "/products", "/shop",
         ]
         return [f"{base}{p}" for p in common_paths[:max_pages]]
 
@@ -151,7 +162,8 @@ class AssetExtractor:
         high_priority_keywords = [
             "product", "shop", "store", "gallery", "portfolio",
             "about", "team", "service", "collection", "catalog",
-            "work", "case-stud", "testimonial", "review", "pricing",
+            "work", "project", "case-stud", "testimonial", "review", "pricing",
+            "location", "clinic", "office", "interior", "exterior",
         ]
         medium_priority_keywords = ["blog", "news", "article", "post"]
 
@@ -165,7 +177,8 @@ class AssetExtractor:
             for kw in medium_priority_keywords:
                 if kw in lower:
                     return 10
-            return 1
+            path_depth = max(1, lower.count("/"))
+            return max(1, 8 - path_depth)
 
         same_domain.sort(key=score, reverse=True)
         return same_domain
@@ -176,7 +189,8 @@ class AssetExtractor:
             raw = await asyncio.to_thread(
                 self._firecrawl._app.scrape_url,
                 page_url,
-                {"formats": ["markdown", "links"]},
+                formats=["markdown", "links", "html", "rawHtml"],
+                only_main_content=False,
             )
             if not isinstance(raw, dict):
                 raw = raw.__dict__ if hasattr(raw, "__dict__") else {}
@@ -186,6 +200,7 @@ class AssetExtractor:
 
         images: list[dict[str, Any]] = []
         markdown = raw.get("markdown", "") or ""
+        html = raw.get("html", "") or raw.get("rawHtml", "") or ""
         metadata = raw.get("metadata", {}) or {}
 
         # Extract image URLs from markdown (![alt](url) pattern)
@@ -198,7 +213,14 @@ class AssetExtractor:
             })
 
         # Also grab OG image, twitter image, etc. from metadata
-        for meta_key in ["og:image", "twitter:image", "image"]:
+        for meta_key in [
+            "og:image",
+            "og:logo",
+            "twitter:image",
+            "image",
+            "logo",
+            "msapplication-TileImage",
+        ]:
             if metadata.get(meta_key):
                 img_url = metadata[meta_key]
                 if img_url and not any(i["url"] == img_url for i in images):
@@ -207,6 +229,9 @@ class AssetExtractor:
                         "alt_text": metadata.get("og:image:alt"),
                         "context": metadata.get("og:description") or metadata.get("description"),
                     })
+
+        if html:
+            images.extend(self._extract_images_from_html(html, metadata))
 
         # Extract links that look like images
         links = raw.get("links", []) or []
@@ -222,6 +247,63 @@ class AssetExtractor:
                 })
 
         return images
+
+    def _extract_images_from_html(
+        self,
+        html: str,
+        metadata: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Extract image-like assets from raw HTML and inline styles."""
+        images: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+
+        for match in re.finditer(r"<img\b[^>]*\bsrc=[\"']([^\"']+)[\"'][^>]*>", html, re.IGNORECASE):
+            fragment = match.group(0)
+            url = match.group(1).strip()
+            alt_match = re.search(r"\balt=[\"']([^\"']*)[\"']", fragment, re.IGNORECASE)
+            alt_text = alt_match.group(1).strip() if alt_match else None
+            self._append_image(images, seen_urls, url, alt_text=alt_text)
+
+        for match in re.finditer(r"\bsrcset=[\"']([^\"']+)[\"']", html, re.IGNORECASE):
+            for candidate in match.group(1).split(","):
+                url = candidate.strip().split(" ")[0].strip()
+                self._append_image(images, seen_urls, url)
+
+        for match in re.finditer(
+            r"<(?:source|link)\b[^>]*(?:src|href)=[\"']([^\"']+)[\"'][^>]*>",
+            html,
+            re.IGNORECASE,
+        ):
+            self._append_image(images, seen_urls, match.group(1).strip())
+
+        for match in re.finditer(r"url\(([^)]+)\)", html, re.IGNORECASE):
+            url = match.group(1).strip().strip("\"'")
+            self._append_image(
+                images,
+                seen_urls,
+                url,
+                context=metadata.get("description") or metadata.get("og:description"),
+            )
+
+        return images
+
+    @staticmethod
+    def _append_image(
+        images: list[dict[str, Any]],
+        seen_urls: set[str],
+        url: str | None,
+        *,
+        alt_text: str | None = None,
+        context: str | None = None,
+    ) -> None:
+        """Append an image candidate only once."""
+        if not url:
+            return
+        normalized = url.strip()
+        if not normalized or normalized in seen_urls:
+            return
+        seen_urls.add(normalized)
+        images.append({"url": normalized, "alt_text": alt_text, "context": context})
 
     # ── Filtering ─────────────────────────────────────────────────────────
 
@@ -291,7 +373,10 @@ class AssetExtractor:
                 return None
 
             data = resp.content
-            if len(data) < 1000:  # Skip tiny images (<1KB)
+            width, height = self._get_image_dimensions(data, content_type=content_type)
+            keep_small_asset = self._should_keep_small_asset(entry, url, content_type, width, height)
+
+            if len(data) < MIN_FALLBACK_BYTES and not keep_small_asset:
                 return None
 
             # Generate filename from URL hash
@@ -299,11 +384,12 @@ class AssetExtractor:
             ext = mimetypes.guess_extension(content_type.split(";")[0]) or ".jpg"
             file_name = f"{url_hash}{ext}"
 
-            # Try to get dimensions
-            width, height = self._get_image_dimensions(data)
-
             # Skip too-small images
-            if width and height and (width < MIN_USABLE_WIDTH or height < MIN_USABLE_HEIGHT):
+            if (
+                width and height
+                and (width < MIN_FALLBACK_WIDTH or height < MIN_FALLBACK_HEIGHT)
+                and not keep_small_asset
+            ):
                 return None
 
             key = self._storage.build_key(brand_id, file_name)
@@ -313,7 +399,7 @@ class AssetExtractor:
                 content_type=content_type.split(";")[0],
             )
 
-            return {
+            asset = {
                 "source_url": url,
                 "source_page": entry.get("source_page"),
                 "stored_url": stored_url,
@@ -324,15 +410,49 @@ class AssetExtractor:
                 "height": height,
                 "alt_text": entry.get("alt_text"),
                 "context": entry.get("context"),
+                "extraction_metadata": {
+                    "discovery_source": "html_or_markdown",
+                    "raw_discovered_asset": False,
+                },
             }
+            self._mark_fallback_asset_if_needed(
+                asset,
+                content_type=content_type,
+                keep_small_asset=keep_small_asset,
+            )
+            return asset
 
         except Exception:
             logger.debug("Failed to download %s", url)
             return None
 
     @staticmethod
-    def _get_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
+    def _get_image_dimensions(
+        data: bytes,
+        *,
+        content_type: str | None = None,
+    ) -> tuple[int | None, int | None]:
         """Extract image dimensions without PIL if possible, else try PIL."""
+        if content_type and "svg" in content_type.lower():
+            text = data.decode("utf-8", errors="ignore")
+            width_match = re.search(r'\bwidth=[\"\']?([\d.]+)', text, re.IGNORECASE)
+            height_match = re.search(r'\bheight=[\"\']?([\d.]+)', text, re.IGNORECASE)
+            if width_match and height_match:
+                try:
+                    return int(float(width_match.group(1))), int(float(height_match.group(1)))
+                except ValueError:
+                    pass
+            view_box_match = re.search(
+                r'\bviewBox=[\"\'][^\"\']*?(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)[\"\']',
+                text,
+                re.IGNORECASE,
+            )
+            if view_box_match:
+                try:
+                    return int(float(view_box_match.group(1))), int(float(view_box_match.group(2)))
+                except ValueError:
+                    pass
+
         try:
             from PIL import Image
             img = Image.open(io.BytesIO(data))
@@ -361,6 +481,86 @@ class AssetExtractor:
                 i += 2 + seg_len
 
         return None, None
+
+    def _should_keep_small_asset(
+        self,
+        entry: dict[str, Any],
+        url: str,
+        content_type: str,
+        width: int | None,
+        height: int | None,
+    ) -> bool:
+        """Return True when a small asset still looks meaningful enough to keep."""
+        if "svg" in content_type.lower():
+            return True
+
+        clues = " ".join(
+            [
+                url,
+                str(entry.get("alt_text") or ""),
+                str(entry.get("source_page") or ""),
+                str(entry.get("context") or ""),
+            ]
+        )
+        if MEANINGFUL_ASSET_PATTERNS.search(clues):
+            return True
+
+        if width and height and width >= MIN_USABLE_WIDTH and height >= MIN_USABLE_HEIGHT:
+            return True
+
+        return False
+
+    def _mark_fallback_asset_if_needed(
+        self,
+        asset: dict[str, Any],
+        *,
+        content_type: str,
+        keep_small_asset: bool,
+    ) -> None:
+        """Mark low-signal assets so they remain visible without polluting usable selections."""
+        width = asset.get("width")
+        height = asset.get("height")
+        file_size = asset.get("file_size") or 0
+        is_small_raster = bool(
+            width and height and (width < MIN_USABLE_WIDTH or height < MIN_USABLE_HEIGHT)
+        ) or file_size < MIN_USABLE_BYTES
+        is_svg = "svg" in content_type.lower()
+        is_fallback = is_svg or (keep_small_asset and is_small_raster)
+        if not is_fallback:
+            return
+
+        url = str(asset.get("source_url") or "")
+        alt_text = str(asset.get("alt_text") or "")
+        lowered = f"{url} {alt_text}".lower()
+        category = "logo" if "logo" in lowered or is_svg else "other"
+        description = (
+            "Vector logo or brand mark extracted from the site."
+            if category == "logo"
+            else "Discovered raw brand asset kept for reference, but not promoted as a primary ad visual."
+        )
+        asset.update(
+            {
+                "category": category,
+                "description": asset.get("description") or description,
+                "quality_score": asset.get("quality_score") or (6 if category == "logo" else 3),
+                "is_usable": category == "logo",
+                "tags": asset.get("tags") or ([category, "brand"] if category == "logo" else ["reference"]),
+                "suggested_ad_use": (
+                    "Use as brand lockup, end card, or identity element."
+                    if category == "logo"
+                    else "Reference only; use to understand the brand visual system."
+                ),
+                "preclassified": True,
+            }
+        )
+        extraction_metadata = asset.setdefault("extraction_metadata", {})
+        if isinstance(extraction_metadata, dict):
+            extraction_metadata["raw_discovered_asset"] = True
+            extraction_metadata["fallback_reason"] = (
+                "svg_logo"
+                if is_svg
+                else "kept_despite_small_dimensions"
+            )
 
     # ── Helpers ────────────────────────────────────────────────────────────
 

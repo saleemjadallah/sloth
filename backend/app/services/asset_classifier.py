@@ -117,11 +117,22 @@ class AssetClassifier:
     ) -> list[dict[str, Any]]:
         """Send a batch of images to Claude for classification."""
         content: list[dict[str, Any]] = []
+        classifications: list[dict[str, Any]] = [
+            self._fallback_classification(asset) for asset in batch
+        ]
+        analyzable_indices: list[int] = []
 
         # Build the message content with images + context
         for idx, asset in enumerate(batch):
+            if asset.get("preclassified"):
+                continue
+
             stored_path = asset.get("stored_url")
             if not stored_path:
+                continue
+
+            mime = asset.get("mime_type", "image/jpeg")
+            if mime not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
                 continue
 
             image_data = await self._load_image_b64(
@@ -131,10 +142,7 @@ class AssetClassifier:
             if not image_data:
                 continue
 
-            mime = asset.get("mime_type", "image/jpeg")
-            # Claude accepts: image/jpeg, image/png, image/gif, image/webp
-            if mime not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
-                mime = "image/jpeg"
+            analyzable_indices.append(idx)
 
             # Add context text for this image
             context_parts = []
@@ -159,7 +167,7 @@ class AssetClassifier:
             })
 
         if not content:
-            return [{"category": "other", "quality_score": 1, "is_usable": False}] * len(batch)
+            return classifications
 
         # Add the analysis prompt
         content.append({
@@ -179,8 +187,28 @@ class AssetClassifier:
         )
 
         raw_text = response.content[0].text
-        results = self._parse_results(raw_text, len(batch))
-        return results
+        results = self._parse_results(raw_text, len(analyzable_indices))
+
+        assigned_indices: set[int] = set()
+        for result in results:
+            result_index = result.get("index")
+            if isinstance(result_index, int) and 0 <= result_index < len(batch):
+                classifications[result_index].update(result)
+                assigned_indices.add(result_index)
+
+        if len(assigned_indices) != len(analyzable_indices):
+            unassigned_results = [
+                result
+                for result in results
+                if not isinstance(result.get("index"), int)
+            ]
+            for batch_index, result in zip(
+                [idx for idx in analyzable_indices if idx not in assigned_indices],
+                unassigned_results,
+            ):
+                classifications[batch_index].update(result)
+
+        return classifications
 
     async def _load_image_b64(
         self,
@@ -239,3 +267,37 @@ class AssetClassifier:
         return [
             {"category": "other", "quality_score": 5, "is_usable": True}
         ] * expected_count
+
+    @staticmethod
+    def _fallback_classification(asset: dict[str, Any]) -> dict[str, Any]:
+        """Return a safe default classification, preserving extractor hints."""
+        if asset.get("preclassified"):
+            return {
+                "category": asset.get("category", "other"),
+                "description": asset.get("description", ""),
+                "quality_score": asset.get("quality_score", 5),
+                "tags": asset.get("tags", []),
+                "is_usable": asset.get("is_usable", False),
+                "suggested_ad_use": asset.get("suggested_ad_use", ""),
+            }
+
+        mime_type = str(asset.get("mime_type") or "").lower()
+        source = " ".join(
+            [
+                str(asset.get("source_url") or ""),
+                str(asset.get("alt_text") or ""),
+                str(asset.get("context") or ""),
+            ]
+        ).lower()
+        category = "logo" if "logo" in source or "svg" in mime_type else "other"
+        return {
+            "category": category,
+            "description": asset.get("description", ""),
+            "quality_score": asset.get("quality_score", 5 if category == "logo" else 3),
+            "tags": asset.get("tags", []),
+            "is_usable": asset.get("is_usable", category == "logo"),
+            "suggested_ad_use": asset.get(
+                "suggested_ad_use",
+                "Use as a brand identity element." if category == "logo" else "",
+            ),
+        }
