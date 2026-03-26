@@ -115,7 +115,10 @@ class AssetExtractor:
                 continue
             for img in result:
                 # Normalize and deduplicate
-                abs_url = urljoin(page_url, img["url"])
+                candidate_url = self._normalize_candidate_url(img.get("url"))
+                if not candidate_url:
+                    continue
+                abs_url = urljoin(str(page_url), candidate_url)
                 if abs_url not in seen_urls:
                     seen_urls.add(abs_url)
                     img["url"] = abs_url
@@ -201,10 +204,13 @@ class AssetExtractor:
         # Extract image URLs from markdown (![alt](url) pattern)
         md_images = re.findall(r"!\[([^\]]*)\]\(([^)]+)\)", markdown)
         for alt_text, img_url in md_images:
+            normalized_url = self._normalize_candidate_url(img_url)
+            if not normalized_url:
+                continue
             images.append({
-                "url": img_url,
+                "url": normalized_url,
                 "alt_text": alt_text or None,
-                "context": self._get_surrounding_text(markdown, img_url),
+                "context": self._get_surrounding_text(markdown, normalized_url),
             })
 
         # Also grab OG image, twitter image, etc. from metadata
@@ -217,7 +223,7 @@ class AssetExtractor:
             "msapplication-TileImage",
         ]:
             if metadata.get(meta_key):
-                img_url = metadata[meta_key]
+                img_url = self._normalize_candidate_url(metadata[meta_key])
                 if img_url and not any(i["url"] == img_url for i in images):
                     images.append({
                         "url": img_url,
@@ -231,7 +237,11 @@ class AssetExtractor:
         # Extract links that look like images
         links = raw.get("links", []) or []
         for link in links:
-            link_url = link if isinstance(link, str) else link.get("url", "")
+            link_url = self._normalize_candidate_url(
+                link if isinstance(link, str) else link.get("url", "")
+            )
+            if not link_url:
+                continue
             parsed = urlparse(link_url)
             ext = Path(parsed.path).suffix.lower()
             if ext in IMAGE_EXTENSIONS and not any(i["url"] == link_url for i in images):
@@ -286,19 +296,41 @@ class AssetExtractor:
     def _append_image(
         images: list[dict[str, Any]],
         seen_urls: set[str],
-        url: str | None,
+        url: object,
         *,
         alt_text: str | None = None,
         context: str | None = None,
     ) -> None:
         """Append an image candidate only once."""
-        if not url:
+        normalized = AssetExtractor._normalize_candidate_url(url)
+        if not normalized:
             return
-        normalized = url.strip()
         if not normalized or normalized in seen_urls:
             return
         seen_urls.add(normalized)
         images.append({"url": normalized, "alt_text": alt_text, "context": context})
+
+    @staticmethod
+    def _normalize_candidate_url(value: object) -> str | None:
+        """Normalize Firecrawl-discovered URL values to a usable string."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        if isinstance(value, dict):
+            for key in ("url", "src", "href"):
+                normalized = AssetExtractor._normalize_candidate_url(value.get(key))
+                if normalized:
+                    return normalized
+            return None
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                normalized = AssetExtractor._normalize_candidate_url(item)
+                if normalized:
+                    return normalized
+            return None
+        return None
 
     # ── Filtering ─────────────────────────────────────────────────────────
 
