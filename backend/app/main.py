@@ -5,14 +5,12 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
-from pathlib import Path
-
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.routes.brands import router as brands_router
+from app.services.asset_storage import AssetStorage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,11 +51,18 @@ app.add_middleware(
 
 app.include_router(brands_router)
 
-# ── Static files (serve downloaded brand assets) ────────────────────────
+asset_storage = AssetStorage.from_settings()
 
-assets_dir = Path("assets")
-assets_dir.mkdir(exist_ok=True)
-app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+@app.get("/assets/{asset_path:path}", include_in_schema=False)
+async def serve_asset(asset_path: str) -> Response:
+    stored_url = f"assets/{asset_path}".lstrip("/")
+    try:
+        data, content_type = await asset_storage.read_asset(stored_url)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Asset not found: {asset_path}") from exc
+
+    return Response(content=data, media_type=content_type)
 
 
 # ── Health check ────────────────────────────────────────────────────────

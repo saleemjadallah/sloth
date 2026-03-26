@@ -13,10 +13,11 @@ import base64
 import json
 import logging
 import re
-from pathlib import Path
 from typing import Any
 
 import anthropic
+
+from app.services.asset_storage import AssetStorage
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +69,9 @@ for creating advertising content for this brand."""
 class AssetClassifier:
     """Classifies brand assets using Claude's vision capabilities."""
 
-    def __init__(self, anthropic_api_key: str) -> None:
+    def __init__(self, anthropic_api_key: str, storage: AssetStorage) -> None:
         self._client = anthropic.AsyncAnthropic(api_key=anthropic_api_key)
+        self._storage = storage
 
     async def classify_assets(
         self,
@@ -122,7 +124,10 @@ class AssetClassifier:
             if not stored_path:
                 continue
 
-            image_data = self._load_image_b64(stored_path)
+            image_data = await self._load_image_b64(
+                stored_path,
+                fallback_mime_type=asset.get("mime_type"),
+            )
             if not image_data:
                 continue
 
@@ -177,20 +182,23 @@ class AssetClassifier:
         results = self._parse_results(raw_text, len(batch))
         return results
 
-    @staticmethod
-    def _load_image_b64(file_path: str) -> str | None:
-        """Load an image file and return base64 encoded string."""
-        path = Path(file_path)
-        if not path.exists():
-            return None
+    async def _load_image_b64(
+        self,
+        stored_url: str,
+        fallback_mime_type: str | None = None,
+    ) -> str | None:
+        """Load an image from storage and return a base64 encoded string."""
         try:
-            data = path.read_bytes()
+            data, _ = await self._storage.read_asset(
+                stored_url,
+                fallback_content_type=fallback_mime_type,
+            )
             # Skip files larger than 5MB to stay within API limits
             if len(data) > 5 * 1024 * 1024:
                 return None
             return base64.standard_b64encode(data).decode("ascii")
         except Exception:
-            logger.debug("Failed to load image %s", file_path)
+            logger.debug("Failed to load image %s", stored_url)
             return None
 
     @staticmethod

@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Sequence
 
 import httpx
@@ -42,6 +41,7 @@ from app.schemas.creative import (
 from app.services.asset_classifier import AssetClassifier
 from app.services.asset_extractor import AssetExtractor
 from app.services.brand_analysis import BrandAnalysisService
+from app.services.asset_storage import AssetStorage
 from app.services.creative_studio import CreativeStudioService
 from app.services.firecrawl_service import FirecrawlService
 from app.services.image_variation import ImageVariationService
@@ -59,8 +59,12 @@ def _get_analysis_service() -> BrandAnalysisService:
     """Build the analysis service with current config."""
     firecrawl = FirecrawlService(api_key=settings.FIRECRAWL_API_KEY)
     llm = LLMService(anthropic_api_key=settings.ANTHROPIC_API_KEY)
-    extractor = AssetExtractor(firecrawl_service=firecrawl, storage_dir="assets")
-    classifier = AssetClassifier(anthropic_api_key=settings.ANTHROPIC_API_KEY)
+    storage = AssetStorage.from_settings()
+    extractor = AssetExtractor(firecrawl_service=firecrawl, storage=storage)
+    classifier = AssetClassifier(
+        anthropic_api_key=settings.ANTHROPIC_API_KEY,
+        storage=storage,
+    )
     return BrandAnalysisService(
         firecrawl_service=firecrawl,
         llm_service=llm,
@@ -622,12 +626,17 @@ async def create_brand_asset_variations(
             detail="Selected asset is missing a stored image and cannot be used for variation generation.",
         )
 
+    storage = AssetStorage.from_settings()
+
     try:
-        source_bytes = Path(source_asset.stored_url).read_bytes()
-    except OSError as exc:
+        source_bytes, _ = await storage.read_asset(
+            source_asset.stored_url,
+            fallback_content_type=source_asset.mime_type,
+        )
+    except FileNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Could not read source asset from disk: {exc}",
+            detail=f"Could not read source asset from storage: {exc}",
         ) from exc
 
     service = _get_image_variation_service()
@@ -651,21 +660,28 @@ async def create_brand_asset_variations(
 
     created_assets: list[BrandAsset] = []
     for output in outputs:
-        stored = service.save_generated_image(
-            brand_id=str(brand_id),
-            image_bytes=output["bytes"],
-            mime_type=output["mime_type"],
+        extension = {
+            "image/png": ".png",
+            "image/webp": ".webp",
+            "image/jpeg": ".jpg",
+            "image/jpg": ".jpg",
+        }.get(output["mime_type"].lower(), ".png")
+        file_name = f"generated-{uuid.uuid4().hex[:12]}{extension}"
+        stored_url = await storage.save_asset(
+            key=storage.build_key(str(brand_id), file_name),
+            data=output["bytes"],
+            content_type=output["mime_type"],
         )
         asset = BrandAsset(
             brand_id=brand_id,
             source_url=f"generated://{source_asset.id}",
             source_page=source_asset.source_page,
-            stored_url=stored["stored_url"],
-            file_name=stored["file_name"],
-            file_size=stored["file_size"],
-            mime_type=stored["mime_type"],
-            width=stored["width"],
-            height=stored["height"],
+            stored_url=stored_url,
+            file_name=file_name,
+            file_size=len(output["bytes"]),
+            mime_type=output["mime_type"],
+            width=output["width"],
+            height=output["height"],
             category=source_asset.category or "generated",
             description=f"AI variation of {source_asset.description or source_asset.category or 'brand asset'}",
             tags=["ai-generated", "nano-banana-pro"],

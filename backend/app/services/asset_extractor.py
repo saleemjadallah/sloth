@@ -22,6 +22,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from app.services.asset_storage import AssetStorage
 from app.services.firecrawl_service import FirecrawlService
 
 logger = logging.getLogger(__name__)
@@ -47,11 +48,10 @@ class AssetExtractor:
     def __init__(
         self,
         firecrawl_service: FirecrawlService,
-        storage_dir: str = "assets",
+        storage: AssetStorage,
     ) -> None:
         self._firecrawl = firecrawl_service
-        self._storage_base = Path(storage_dir)
-        self._storage_base.mkdir(parents=True, exist_ok=True)
+        self._storage = storage
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -74,10 +74,7 @@ class AssetExtractor:
         logger.info("After filtering: %d candidate images", len(filtered))
 
         # 3. Download images concurrently (with limit)
-        brand_dir = self._storage_base / brand_id
-        brand_dir.mkdir(parents=True, exist_ok=True)
-
-        downloaded = await self._download_batch(filtered, brand_dir)
+        downloaded = await self._download_batch(filtered, brand_id)
         logger.info("Downloaded %d images", len(downloaded))
 
         return downloaded
@@ -248,7 +245,7 @@ class AssetExtractor:
     async def _download_batch(
         self,
         entries: list[dict[str, Any]],
-        brand_dir: Path,
+        brand_id: str,
         concurrency: int = 10,
     ) -> list[dict[str, Any]]:
         """Download images concurrently with a semaphore."""
@@ -257,7 +254,7 @@ class AssetExtractor:
 
         async def _download_one(entry: dict[str, Any]) -> dict[str, Any] | None:
             async with sem:
-                return await self._download_image(entry, brand_dir)
+                return await self._download_image(entry, brand_id)
 
         tasks = [_download_one(e) for e in entries]
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -273,7 +270,7 @@ class AssetExtractor:
     async def _download_image(
         self,
         entry: dict[str, Any],
-        brand_dir: Path,
+        brand_id: str,
     ) -> dict[str, Any] | None:
         """Download a single image and return its metadata."""
         url = entry["url"]
@@ -301,23 +298,25 @@ class AssetExtractor:
             url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
             ext = mimetypes.guess_extension(content_type.split(";")[0]) or ".jpg"
             file_name = f"{url_hash}{ext}"
-            file_path = brand_dir / file_name
-
-            # Write to disk
-            file_path.write_bytes(data)
 
             # Try to get dimensions
             width, height = self._get_image_dimensions(data)
 
             # Skip too-small images
             if width and height and (width < MIN_USABLE_WIDTH or height < MIN_USABLE_HEIGHT):
-                file_path.unlink(missing_ok=True)
                 return None
+
+            key = self._storage.build_key(brand_id, file_name)
+            stored_url = await self._storage.save_asset(
+                key=key,
+                data=data,
+                content_type=content_type.split(";")[0],
+            )
 
             return {
                 "source_url": url,
                 "source_page": entry.get("source_page"),
-                "stored_url": str(file_path),
+                "stored_url": stored_url,
                 "file_name": file_name,
                 "file_size": len(data),
                 "mime_type": content_type.split(";")[0],
