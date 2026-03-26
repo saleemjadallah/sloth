@@ -446,9 +446,9 @@ async def save_brand_creative_execution(
         delivery_mode=body.delivery_mode,
         status=body.status,
         destination_label=body.destination_label,
-        brief=body.brief.model_dump(),
-        concept=body.concept.model_dump(),
-        execution=body.execution.model_dump(),
+        brief=body.brief.model_dump(mode="json"),
+        concept=body.concept.model_dump(mode="json"),
+        execution=body.execution.model_dump(mode="json"),
     )
     db.add(record)
     await db.flush()
