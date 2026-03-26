@@ -19,13 +19,43 @@ class FirecrawlService:
 
     # ── helpers ─────────────────────────────────────────────────────────
 
+    def _scrape_url_compat(self, url: str, **kwargs: Any) -> Any:
+        """Call Firecrawl scrape_url across SDK versions."""
+        try:
+            return self._app.scrape_url(url, **kwargs)
+        except TypeError:
+            params: dict[str, Any] = {}
+            for key, value in kwargs.items():
+                if value is None:
+                    continue
+                if key == "only_main_content":
+                    params["onlyMainContent"] = value
+                else:
+                    params[key] = value
+            return self._app.scrape_url(url, params=params)
+
     def _scrape_sync(self, url: str) -> dict[str, Any]:
         """Run the blocking Firecrawl call (executed in a thread)."""
-        return self._app.scrape_url(
+        return self._scrape_url_compat(
             url,
             formats=["markdown", "html", "screenshot"],
             only_main_content=False,
         )
+
+    def _map_url_sync(self, url: str) -> Any:
+        """Run the blocking Firecrawl map call (executed in a thread)."""
+        return self._app.map_url(url)
+
+    async def scrape_url(self, url: str, **kwargs: Any) -> dict[str, Any]:
+        """Scrape a page with SDK-version-compatible argument handling."""
+        raw = await asyncio.to_thread(self._scrape_url_compat, url, **kwargs)
+        if isinstance(raw, dict):
+            return raw
+        return raw.__dict__ if hasattr(raw, "__dict__") else {}
+
+    async def map_url(self, url: str) -> Any:
+        """Map a site using the blocking Firecrawl client."""
+        return await asyncio.to_thread(self._map_url_sync, url)
 
     # ── public API ──────────────────────────────────────────────────────
 

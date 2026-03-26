@@ -68,19 +68,61 @@ class BrandFonts(BaseModel):
 class BrandVoice(BaseModel):
     tone: str = ""
     style: str = ""
-    personality_traits: list[str] = []
+    personality_traits: list[str] = Field(default_factory=list)
+
+    @field_validator("tone", "style", mode="before")
+    @classmethod
+    def _coerce_voice_text(cls, value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        return str(value)
+
+    @field_validator("personality_traits", mode="before")
+    @classmethod
+    def _coerce_personality_traits(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            stripped = value.strip()
+            return [stripped] if stripped else []
+        return [str(value).strip()] if str(value).strip() else []
 
 
 class BrandTargetAudience(BaseModel):
     demographics: str = ""
-    pain_points: list[str] = []
-    desires: list[str] = []
+    pain_points: list[str] = Field(default_factory=list)
+    desires: list[str] = Field(default_factory=list)
+
+    @field_validator("demographics", mode="before")
+    @classmethod
+    def _coerce_demographics(cls, value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        return str(value)
+
+    @field_validator("pain_points", "desires", mode="before")
+    @classmethod
+    def _coerce_audience_lists(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            stripped = value.strip()
+            return [stripped] if stripped else []
+        return [str(value).strip()] if str(value).strip() else []
 
 
 class BrandProduct(BaseModel):
     name: str
     description: str = ""
-    key_benefits: list[str] = []
+    key_benefits: list[str] = Field(default_factory=list)
 
 
 # ── Asset schemas ──────────────────────────────────────────────────────

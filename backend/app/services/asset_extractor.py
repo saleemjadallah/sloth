@@ -128,9 +128,7 @@ class AssetExtractor:
         """Get a list of important pages to scrape from the website."""
         try:
             # Use Firecrawl map to discover pages
-            urls = await asyncio.to_thread(
-                self._firecrawl._app.map_url, website_url
-            )
+            urls = await self._firecrawl.map_url(website_url)
             if isinstance(urls, dict):
                 urls = urls.get("links", [])
             if isinstance(urls, list) and urls:
@@ -186,14 +184,11 @@ class AssetExtractor:
     async def _extract_images_from_page(self, page_url: str) -> list[dict[str, Any]]:
         """Scrape a single page and extract all image references."""
         try:
-            raw = await asyncio.to_thread(
-                self._firecrawl._app.scrape_url,
+            raw = await self._firecrawl.scrape_url(
                 page_url,
                 formats=["markdown", "links", "html", "rawHtml"],
                 only_main_content=False,
             )
-            if not isinstance(raw, dict):
-                raw = raw.__dict__ if hasattr(raw, "__dict__") else {}
         except Exception:
             logger.warning("Failed to scrape %s for images", page_url)
             return []
