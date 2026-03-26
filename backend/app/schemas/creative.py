@@ -205,6 +205,7 @@ class PublishSavedCreativeExecutionResponse(BaseModel):
 class WorkspaceDeliveryState(BaseModel):
     delivery_mode: str = "late_dev"
     destination_label: str | None = None
+    selected_late_profile_id: str | None = None
     publish_title: str | None = None
     content_override: str | None = None
     selected_late_account_ids: list[str] = Field(default_factory=list)

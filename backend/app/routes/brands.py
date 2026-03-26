@@ -188,6 +188,7 @@ def _default_workspace_delivery() -> dict[str, object]:
     return {
         "delivery_mode": "late_dev",
         "destination_label": None,
+        "selected_late_profile_id": None,
         "publish_title": None,
         "content_override": None,
         "selected_late_account_ids": [],
