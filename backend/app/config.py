@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     R2_BUCKET: str = "sloth-assets"
 
     # ── CORS ────────────────────────────────────────────────────────────
-    CORS_ORIGINS: list[str] = ["http://localhost:3000"]
+    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:3002"]
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
