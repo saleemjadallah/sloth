@@ -6,11 +6,12 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -54,6 +55,52 @@ router = APIRouter(prefix="/brands", tags=["brands"])
 
 
 # ── Helpers / factories ─────────────────────────────────────────────────
+
+def _normalize_brand_website_url(raw_url: str) -> str:
+    """Normalize a website URL so repeat analyses reuse the same brand record."""
+    candidate = raw_url.strip()
+    if "://" not in candidate:
+        candidate = f"https://{candidate}"
+
+    parsed = urlsplit(candidate)
+    scheme = (parsed.scheme or "https").lower()
+    netloc = parsed.netloc.lower()
+    path = parsed.path.rstrip("/")
+    return urlunsplit((scheme, netloc, path, "", ""))
+
+
+def _brand_lookup_tokens(raw_query: str) -> set[str]:
+    """Build a small set of normalized lookup keys for brand resolution."""
+    query = raw_query.strip().lower()
+    if not query:
+        return set()
+
+    tokens = {query}
+    normalized_url = _normalize_brand_website_url(query)
+    parsed = urlsplit(normalized_url)
+    domain = parsed.netloc.lower().removeprefix("www.")
+
+    tokens.add(normalized_url.lower())
+    tokens.add(domain)
+    if domain:
+        tokens.add(f"https://{domain}")
+        tokens.add(f"http://{domain}")
+    return {token for token in tokens if token}
+
+
+def _dedupe_brands(brands: Sequence[Brand]) -> list[Brand]:
+    """Return the newest brand per normalized website URL."""
+    deduped: list[Brand] = []
+    seen_urls: set[str] = set()
+
+    for brand in brands:
+        normalized_url = _normalize_brand_website_url(brand.website_url)
+        if normalized_url in seen_urls:
+            continue
+        seen_urls.add(normalized_url)
+        deduped.append(brand)
+
+    return deduped
 
 def _get_analysis_service() -> BrandAnalysisService:
     """Build the analysis service with current config."""
@@ -135,12 +182,14 @@ async def _get_saved_execution_or_404(
     db: AsyncSession,
 ) -> CreativeExecution:
     """Fetch a saved execution by ID and brand or raise 404."""
+    brand = await _get_brand_or_404(brand_id, db)
+    related_brand_ids = await _get_related_brand_ids(brand, db)
     result = await db.execute(
         select(CreativeExecution)
         .options(selectinload(CreativeExecution.brand))
         .where(
             CreativeExecution.id == execution_id,
-            CreativeExecution.brand_id == brand_id,
+            CreativeExecution.brand_id.in_(related_brand_ids),
         )
     )
     execution = result.scalar_one_or_none()
@@ -150,6 +199,21 @@ async def _get_saved_execution_or_404(
             detail=f"Creative execution {execution_id} not found for brand {brand_id}.",
         )
     return execution
+
+
+async def _get_related_brand_ids(
+    brand: Brand,
+    db: AsyncSession,
+) -> list[uuid.UUID]:
+    """Return all brand IDs that represent the same normalized website."""
+    result = await db.execute(select(Brand.id, Brand.website_url))
+    normalized_url = _normalize_brand_website_url(brand.website_url)
+    related_ids = [
+        row.id
+        for row in result.all()
+        if _normalize_brand_website_url(row.website_url) == normalized_url
+    ]
+    return related_ids or [brand.id]
 
 
 # ── Endpoints ───────────────────────────────────────────────────────────
@@ -165,16 +229,35 @@ async def analyze_brand(
     db: AsyncSession = Depends(get_db),
 ) -> Brand:
     """Scrape the given URL, run LLM analysis, extract assets, and persist."""
-    website_url = str(body.website_url)
+    website_url = _normalize_brand_website_url(str(body.website_url))
 
-    # Create a placeholder record so the client can poll status.
-    brand = Brand(
-        name="",
-        website_url=website_url,
-        analysis_status="analyzing",
+    existing_result = await db.execute(
+        select(Brand)
+        .options(selectinload(Brand.assets))
+        .order_by(Brand.updated_at.desc(), Brand.created_at.desc())
     )
-    db.add(brand)
-    await db.flush()  # assigns the id
+    brand = next(
+        (
+            candidate
+            for candidate in existing_result.scalars().all()
+            if _normalize_brand_website_url(candidate.website_url) == website_url
+        ),
+        None,
+    )
+
+    if brand is None:
+        # Create a placeholder record so the client can poll status.
+        brand = Brand(
+            name="",
+            website_url=website_url,
+            analysis_status="analyzing",
+        )
+        db.add(brand)
+        await db.flush()  # assigns the id
+    else:
+        brand.website_url = website_url
+        brand.analysis_status = "analyzing"
+        await db.flush()
 
     try:
         service = _get_analysis_service()
@@ -195,7 +278,9 @@ async def analyze_brand(
         brand.raw_analysis = profile.get("raw_analysis")
         brand.analysis_status = "completed"
 
-        # Persist extracted assets
+        # Replace extracted assets so re-analysis refreshes the same brand record.
+        await db.execute(delete(BrandAsset).where(BrandAsset.brand_id == brand.id))
+
         for asset_data in profile.get("assets", []):
             asset = BrandAsset(
                 brand_id=brand.id,
@@ -239,9 +324,56 @@ async def list_brands(
 ) -> Sequence[Brand]:
     """Return all brands ordered by creation date (newest first)."""
     result = await db.execute(
-        select(Brand).order_by(Brand.created_at.desc())
+        select(Brand)
+        .options(selectinload(Brand.assets))
+        .order_by(Brand.updated_at.desc(), Brand.created_at.desc())
     )
-    return result.scalars().all()
+    return _dedupe_brands(result.scalars().all())
+
+
+@router.get(
+    "/lookup",
+    response_model=BrandListItem,
+    summary="Find the latest saved brand by domain, URL, or brand name",
+)
+async def lookup_brand(
+    query: str = Query(..., min_length=2, description="Domain, URL, or brand name"),
+    db: AsyncSession = Depends(get_db),
+) -> Brand:
+    """Resolve a user-entered brand query to the latest saved brand profile."""
+    lookup_tokens = _brand_lookup_tokens(query)
+    result = await db.execute(
+        select(Brand)
+        .options(selectinload(Brand.assets))
+        .order_by(Brand.updated_at.desc(), Brand.created_at.desc())
+    )
+    brands = _dedupe_brands(result.scalars().all())
+
+    def exact_match(brand: Brand) -> bool:
+        normalized_url = _normalize_brand_website_url(brand.website_url).lower()
+        domain = urlsplit(normalized_url).netloc.lower().removeprefix("www.")
+        name = (brand.name or "").strip().lower()
+        return bool({normalized_url, domain, name} & lookup_tokens)
+
+    def partial_match(brand: Brand) -> bool:
+        normalized_url = _normalize_brand_website_url(brand.website_url).lower()
+        domain = urlsplit(normalized_url).netloc.lower().removeprefix("www.")
+        name = (brand.name or "").strip().lower()
+        return any(
+            token in normalized_url or token in domain or token in name
+            for token in lookup_tokens
+        )
+
+    match = next((brand for brand in brands if exact_match(brand)), None)
+    if match is None:
+        match = next((brand for brand in brands if partial_match(brand)), None)
+
+    if match is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No saved brand found for '{query}'.",
+        )
+    return match
 
 
 @router.get(
@@ -336,10 +468,11 @@ async def list_brand_creative_executions(
     db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, object]]:
     """Return saved execution packs ordered by most recent first."""
-    await _get_brand_or_404(brand_id, db)
+    brand = await _get_brand_or_404(brand_id, db)
+    related_brand_ids = await _get_related_brand_ids(brand, db)
     result = await db.execute(
         select(CreativeExecution)
-        .where(CreativeExecution.brand_id == brand_id)
+        .where(CreativeExecution.brand_id.in_(related_brand_ids))
         .order_by(CreativeExecution.updated_at.desc(), CreativeExecution.created_at.desc())
     )
     records = result.scalars().all()
