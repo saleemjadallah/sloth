@@ -9,7 +9,7 @@ from typing import Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -101,6 +101,83 @@ def _dedupe_brands(brands: Sequence[Brand]) -> list[Brand]:
         deduped.append(brand)
 
     return deduped
+
+
+def _is_public_http_url(value: str | None) -> bool:
+    """Return True when the value is a direct HTTP(S) URL."""
+    if not value:
+        return False
+    lowered = value.lower()
+    return lowered.startswith("http://") or lowered.startswith("https://")
+
+
+def _infer_late_media_type(asset: BrandAsset) -> str | None:
+    """Infer the media type expected by Late from the asset metadata."""
+    mime_type = (asset.mime_type or "").lower()
+    if mime_type.startswith("image/"):
+        return "image"
+    if mime_type.startswith("video/"):
+        return "video"
+
+    file_name = (asset.file_name or asset.stored_url or asset.source_url or "").lower()
+    if file_name.endswith((".mp4", ".mov", ".m4v", ".webm")):
+        return "video"
+    if file_name.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")):
+        return "image"
+    return None
+
+
+def _build_public_asset_url(asset: BrandAsset, request: Request) -> str | None:
+    """Return a publishable public URL for a brand asset."""
+    if _is_public_http_url(asset.source_url):
+        return asset.source_url
+    if asset.stored_url:
+        asset_path = asset.stored_url.lstrip("/").removeprefix("assets/")
+        return str(request.url_for("serve_asset", asset_path=asset_path))
+    return None
+
+
+async def _build_late_media_items(
+    record: CreativeExecution,
+    db: AsyncSession,
+    request: Request,
+) -> list[dict[str, str]]:
+    """Resolve selected execution assets into Late mediaItems payload entries."""
+    concept = record.concept or {}
+    raw_asset_ids = concept.get("asset_ids") if isinstance(concept, dict) else None
+    asset_ids: list[uuid.UUID] = []
+    for asset_id in raw_asset_ids or []:
+        try:
+            asset_ids.append(uuid.UUID(str(asset_id)))
+        except (TypeError, ValueError):
+            continue
+
+    if not asset_ids:
+        return []
+
+    related_brand_ids = await _get_related_brand_ids(record.brand, db)
+    assets_result = await db.execute(
+        select(BrandAsset).where(
+            BrandAsset.brand_id.in_(related_brand_ids),
+            BrandAsset.id.in_(asset_ids),
+        )
+    )
+    asset_map = {asset.id: asset for asset in assets_result.scalars().all()}
+
+    media_items: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for asset_id in asset_ids:
+        asset = asset_map.get(asset_id)
+        if asset is None:
+            continue
+        media_type = _infer_late_media_type(asset)
+        media_url = _build_public_asset_url(asset, request)
+        if not media_type or not media_url or media_url in seen_urls:
+            continue
+        seen_urls.add(media_url)
+        media_items.append({"type": media_type, "url": media_url})
+
+    return media_items
 
 def _get_analysis_service() -> BrandAnalysisService:
     """Build the analysis service with current config."""
@@ -577,6 +654,7 @@ async def list_brand_late_accounts(
 async def publish_brand_creative_execution(
     brand_id: uuid.UUID,
     execution_id: uuid.UUID,
+    request: Request,
     body: PublishSavedCreativeExecutionRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
@@ -615,6 +693,17 @@ async def publish_brand_creative_execution(
             detail="One or more selected Late accounts could not be found.",
         )
 
+    media_items = await _build_late_media_items(record, db, request)
+    requires_media = any(
+        (account.get("platform") or "").strip().lower() == "instagram"
+        for account in selected_accounts
+    )
+    if requires_media and not media_items:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Instagram posts require at least one selected image or video asset.",
+        )
+
     execution = record.execution or {}
     content = (
         body.content_override
@@ -647,6 +736,8 @@ async def publish_brand_creative_execution(
             "deliveryMode": record.delivery_mode,
         },
     }
+    if media_items:
+        payload["mediaItems"] = media_items
 
     if body.mode == "draft":
         payload["isDraft"] = True
