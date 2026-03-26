@@ -681,7 +681,6 @@ async def publish_brand_creative_execution(
     record.external_post_url = first_platform.get("platformPostUrl")
     record.last_publish_error = None
     record.publishing_metadata = remote
-    record.destination_label = record.destination_label or body.title or record.destination_label
     record.scheduled_for = body.scheduled_for if body.mode == "schedule" else None
     record.published_at = datetime.now(timezone.utc) if body.mode == "publish_now" else None
     if body.mode == "draft":
