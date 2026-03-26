@@ -106,6 +106,42 @@ def _dedupe_brands(brands: Sequence[Brand]) -> list[Brand]:
     return deduped
 
 
+def _coerce_asset_text(value: object) -> str | None:
+    """Normalize asset fields that must be stored as plain text."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    if isinstance(value, (list, tuple, set)):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+        if not parts:
+            return None
+        return " | ".join(parts)
+    if isinstance(value, dict):
+        for key in ("text", "content", "description", "value", "url"):
+            if key in value:
+                return _coerce_asset_text(value.get(key))
+        rendered = str(value).strip()
+        return rendered or None
+    rendered = str(value).strip()
+    return rendered or None
+
+
+def _coerce_asset_tags(value: object) -> list[str] | None:
+    """Normalize asset tags to a list of strings."""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple, set)):
+        tags = [str(item).strip() for item in value if str(item).strip()]
+        return tags or None
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else None
+    rendered = str(value).strip()
+    return [rendered] if rendered else None
+
+
 def _is_public_http_url(value: str | None) -> bool:
     """Return True when the value is a direct HTTP(S) URL."""
     if not value:
@@ -486,24 +522,24 @@ async def analyze_brand(
         for asset_data in profile.get("assets", []):
             asset = BrandAsset(
                 brand_id=brand.id,
-                source_url=asset_data.get("source_url", ""),
-                source_page=asset_data.get("source_page"),
-                stored_url=asset_data.get("stored_url"),
-                file_name=asset_data.get("file_name"),
+                source_url=_coerce_asset_text(asset_data.get("source_url")) or "",
+                source_page=_coerce_asset_text(asset_data.get("source_page")),
+                stored_url=_coerce_asset_text(asset_data.get("stored_url")),
+                file_name=_coerce_asset_text(asset_data.get("file_name")),
                 file_size=asset_data.get("file_size"),
-                mime_type=asset_data.get("mime_type"),
+                mime_type=_coerce_asset_text(asset_data.get("mime_type")),
                 width=asset_data.get("width"),
                 height=asset_data.get("height"),
-                category=asset_data.get("category"),
-                description=asset_data.get("description"),
-                tags=asset_data.get("tags"),
+                category=_coerce_asset_text(asset_data.get("category")),
+                description=_coerce_asset_text(asset_data.get("description")),
+                tags=_coerce_asset_tags(asset_data.get("tags")),
                 quality_score=asset_data.get("quality_score"),
                 is_usable=asset_data.get("is_usable", True),
-                alt_text=asset_data.get("alt_text"),
-                context=asset_data.get("context"),
+                alt_text=_coerce_asset_text(asset_data.get("alt_text")),
+                context=_coerce_asset_text(asset_data.get("context")),
                 extraction_metadata={
                     **(asset_data.get("extraction_metadata") or {}),
-                    "suggested_ad_use": asset_data.get("suggested_ad_use"),
+                    "suggested_ad_use": _coerce_asset_text(asset_data.get("suggested_ad_use")),
                 },
             )
             db.add(asset)
