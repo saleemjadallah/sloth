@@ -7,7 +7,7 @@ from datetime import datetime
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, String, Text, func
+from sqlalchemy import DateTime, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -58,6 +58,16 @@ class Brand(Base):
         default="pending",
         server_default="pending",
     )
+    workspace_studio: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    workspace_concept_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    workspace_selected_concept_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    workspace_selected_asset_ids: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    workspace_execution: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    workspace_delivery: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    workspace_saved_execution_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+    )
 
     # ── Timestamps ──────────────────────────────────────────────────────
     created_at: Mapped[datetime] = mapped_column(
@@ -94,6 +104,44 @@ class Brand(Base):
         if not self.assets:
             return 0
         return sum(1 for a in self.assets if a.is_usable)
+
+    @property
+    def saved_execution_count(self) -> int:
+        return len(self.creative_executions) if self.creative_executions else 0
+
+    @property
+    def published_execution_count(self) -> int:
+        if not self.creative_executions:
+            return 0
+        return sum(
+            1
+            for execution in self.creative_executions
+            if execution.external_post_id or execution.published_at or execution.scheduled_for
+        )
+
+    @property
+    def active_execution_status(self) -> str | None:
+        latest = self._latest_execution
+        return latest.status if latest else None
+
+    @property
+    def active_execution_updated_at(self) -> datetime | None:
+        latest = self._latest_execution
+        return latest.updated_at if latest else None
+
+    @property
+    def active_execution_last_error(self) -> str | None:
+        latest = self._latest_execution
+        return latest.last_publish_error if latest else None
+
+    @property
+    def _latest_execution(self) -> "CreativeExecution" | None:
+        if not self.creative_executions:
+            return None
+        return max(
+            self.creative_executions,
+            key=lambda execution: execution.updated_at or execution.created_at,
+        )
 
     def __repr__(self) -> str:
         return f"<Brand id={self.id!s} name={self.name!r}>"

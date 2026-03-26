@@ -10,6 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +30,8 @@ from app.schemas.brand import (
     BrandUpdate,
 )
 from app.schemas.creative import (
+    BrandWorkspaceResponse,
+    BrandWorkspaceUpdate,
     CreativeExecutionRequest,
     CreativeExecutionResponse,
     CreativeStudioResponse,
@@ -179,6 +182,121 @@ async def _build_late_media_items(
 
     return media_items
 
+
+def _default_workspace_delivery() -> dict[str, object]:
+    """Return the default persisted delivery configuration."""
+    return {
+        "delivery_mode": "late_dev",
+        "destination_label": None,
+        "publish_title": None,
+        "content_override": None,
+        "selected_late_account_ids": [],
+        "publish_mode": "publish_now",
+        "scheduled_for": None,
+    }
+
+
+def _sanitize_workspace_delivery(delivery: dict | None) -> dict[str, object]:
+    """Normalize persisted delivery JSON to the API shape."""
+    payload = {**_default_workspace_delivery(), **(delivery or {})}
+    payload["selected_late_account_ids"] = [
+        str(item).strip()
+        for item in payload.get("selected_late_account_ids", [])
+        if str(item).strip()
+    ]
+    return payload
+
+
+def _sync_workspace_selection_from_studio(brand: Brand) -> None:
+    """Keep workspace concept and asset selection aligned with the current studio snapshot."""
+    studio = brand.workspace_studio or {}
+    concepts = studio.get("concepts") if isinstance(studio, dict) else None
+    if not isinstance(concepts, list) or not concepts:
+        brand.workspace_selected_concept_id = None
+        brand.workspace_selected_asset_ids = []
+        return
+
+    concept_ids = {
+        str(concept.get("id"))
+        for concept in concepts
+        if isinstance(concept, dict) and concept.get("id")
+    }
+    selected_concept_id = brand.workspace_selected_concept_id
+    if selected_concept_id not in concept_ids:
+        first_concept = next(
+            (concept for concept in concepts if isinstance(concept, dict) and concept.get("id")),
+            None,
+        )
+        brand.workspace_selected_concept_id = (
+            str(first_concept.get("id")) if first_concept else None
+        )
+
+    selected_concept = next(
+        (
+            concept
+            for concept in concepts
+            if isinstance(concept, dict)
+            and str(concept.get("id")) == brand.workspace_selected_concept_id
+        ),
+        None,
+    )
+    selected_asset_ids = (
+        selected_concept.get("asset_ids")
+        if isinstance(selected_concept, dict)
+        else None
+    )
+    brand.workspace_selected_asset_ids = [
+        str(asset_id).strip()
+        for asset_id in selected_asset_ids or []
+        if str(asset_id).strip()
+    ]
+
+
+def _serialize_workspace_execution(brand: Brand) -> dict[str, object] | None:
+    """Return the currently persisted execution pack, if any."""
+    execution = brand.workspace_execution
+    if not isinstance(execution, dict):
+        return None
+    return execution
+
+
+async def _build_brand_workspace_response(
+    brand: Brand,
+    db: AsyncSession,
+) -> dict[str, object]:
+    """Build the full persisted workspace payload for a brand/project."""
+    related_brand_ids = await _get_related_brand_ids(brand, db)
+    result = await db.execute(
+        select(CreativeExecution)
+        .where(CreativeExecution.brand_id.in_(related_brand_ids))
+        .order_by(CreativeExecution.updated_at.desc(), CreativeExecution.created_at.desc())
+    )
+    records = result.scalars().all()
+    service = _get_creative_studio_service()
+
+    workspace_saved_execution_id = brand.workspace_saved_execution_id
+    workspace_execution = _serialize_workspace_execution(brand)
+    if workspace_saved_execution_id is not None:
+        active_record = next(
+            (record for record in records if record.id == workspace_saved_execution_id),
+            None,
+        )
+        if active_record is not None:
+            workspace_execution = service.serialize_saved_execution(active_record)["execution"]
+
+    return {
+        "brand": brand,
+        "studio": brand.workspace_studio,
+        "selected_concept_id": brand.workspace_selected_concept_id,
+        "selected_asset_ids": brand.workspace_selected_asset_ids or [],
+        "execution": workspace_execution,
+        "saved_execution_id": workspace_saved_execution_id,
+        "delivery": _sanitize_workspace_delivery(brand.workspace_delivery),
+        "saved_executions": [
+            service.serialize_saved_execution_summary(record) for record in records
+        ],
+    }
+
 def _get_analysis_service() -> BrandAnalysisService:
     """Build the analysis service with current config."""
     firecrawl = FirecrawlService(api_key=settings.FIRECRAWL_API_KEY)
@@ -239,7 +357,10 @@ async def _get_brand_or_404(
     if with_assets:
         result = await db.execute(
             select(Brand)
-            .options(selectinload(Brand.assets))
+            .options(
+                selectinload(Brand.assets),
+                selectinload(Brand.creative_executions),
+            )
             .where(Brand.id == brand_id)
         )
         brand = result.scalar_one_or_none()
@@ -310,7 +431,10 @@ async def analyze_brand(
 
     existing_result = await db.execute(
         select(Brand)
-        .options(selectinload(Brand.assets))
+        .options(
+            selectinload(Brand.assets),
+            selectinload(Brand.creative_executions),
+        )
         .order_by(Brand.updated_at.desc(), Brand.created_at.desc())
     )
     brand = next(
@@ -387,8 +511,7 @@ async def analyze_brand(
         brand.analysis_status = "failed"
 
     await db.flush()
-    await db.refresh(brand)
-    return brand
+    return await _get_brand_or_404(brand.id, db, with_assets=True)
 
 
 @router.get(
@@ -402,7 +525,10 @@ async def list_brands(
     """Return all brands ordered by creation date (newest first)."""
     result = await db.execute(
         select(Brand)
-        .options(selectinload(Brand.assets))
+        .options(
+            selectinload(Brand.assets),
+            selectinload(Brand.creative_executions),
+        )
         .order_by(Brand.updated_at.desc(), Brand.created_at.desc())
     )
     return _dedupe_brands(result.scalars().all())
@@ -421,7 +547,10 @@ async def lookup_brand(
     lookup_tokens = _brand_lookup_tokens(query)
     result = await db.execute(
         select(Brand)
-        .options(selectinload(Brand.assets))
+        .options(
+            selectinload(Brand.assets),
+            selectinload(Brand.creative_executions),
+        )
         .order_by(Brand.updated_at.desc(), Brand.created_at.desc())
     )
     brands = _dedupe_brands(result.scalars().all())
@@ -466,6 +595,33 @@ async def get_brand(
 
 
 @router.get(
+    "/{brand_id}/workspace",
+    response_model=BrandWorkspaceResponse,
+    summary="Get the persisted project workspace for a brand",
+)
+async def get_brand_workspace(
+    brand_id: uuid.UUID,
+    concept_count: int = Query(4, ge=2, le=6, description="Number of concepts"),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """Return the persisted creative workspace, generating the studio snapshot if needed."""
+    brand = await _get_brand_or_404(brand_id, db, with_assets=True)
+    if (
+        not isinstance(brand.workspace_studio, dict)
+        or brand.workspace_concept_count != concept_count
+    ):
+        service = _get_creative_studio_service()
+        studio = await service.build_studio(brand=brand, concept_count=concept_count)
+        brand.workspace_studio = jsonable_encoder(studio)
+        brand.workspace_concept_count = concept_count
+        _sync_workspace_selection_from_studio(brand)
+        await db.flush()
+        brand = await _get_brand_or_404(brand.id, db, with_assets=True)
+
+    return await _build_brand_workspace_response(brand, db)
+
+
+@router.get(
     "/{brand_id}/creative-studio",
     response_model=CreativeStudioResponse,
     summary="Generate a creative brief and ad concepts for a brand",
@@ -475,10 +631,21 @@ async def get_brand_creative_studio(
     concept_count: int = Query(4, ge=2, le=6, description="Number of concepts"),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    """Build a creative brief and concept set from the stored brand profile."""
+    """Build or reuse a persisted creative brief and concept set for a brand."""
     brand = await _get_brand_or_404(brand_id, db, with_assets=True)
+    if (
+        isinstance(brand.workspace_studio, dict)
+        and brand.workspace_concept_count == concept_count
+    ):
+        return brand.workspace_studio
+
     service = _get_creative_studio_service()
-    return await service.build_studio(brand=brand, concept_count=concept_count)
+    studio = await service.build_studio(brand=brand, concept_count=concept_count)
+    brand.workspace_studio = jsonable_encoder(studio)
+    brand.workspace_concept_count = concept_count
+    _sync_workspace_selection_from_studio(brand)
+    await db.flush()
+    return brand.workspace_studio
 
 
 @router.post(
@@ -494,11 +661,48 @@ async def create_brand_creative_execution(
     """Build an execution pack for a selected concept."""
     brand = await _get_brand_or_404(brand_id, db, with_assets=True)
     service = _get_creative_studio_service()
-    return await service.build_execution_pack(
+    execution = await service.build_execution_pack(
         brand=brand,
         brief=body.brief,
         concept=body.concept,
     )
+    brand.workspace_selected_concept_id = body.concept.id
+    brand.workspace_selected_asset_ids = list(body.concept.asset_ids)
+    brand.workspace_execution = jsonable_encoder(execution)
+    brand.workspace_saved_execution_id = None
+    await db.flush()
+    return execution
+
+
+@router.put(
+    "/{brand_id}/workspace",
+    response_model=BrandWorkspaceResponse,
+    summary="Update the persisted project workspace for a brand",
+)
+async def update_brand_workspace(
+    brand_id: uuid.UUID,
+    body: BrandWorkspaceUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """Persist the current creative studio and delivery state for a brand workspace."""
+    brand = await _get_brand_or_404(brand_id, db, with_assets=True)
+
+    if body.studio is not None:
+        brand.workspace_studio = body.studio.model_dump(mode="json")
+        brand.workspace_concept_count = len(body.studio.concepts) or brand.workspace_concept_count
+
+    if body.selected_concept_id is not None:
+        brand.workspace_selected_concept_id = body.selected_concept_id
+    brand.workspace_selected_asset_ids = list(body.selected_asset_ids)
+
+    if body.execution is not None:
+        brand.workspace_execution = body.execution.model_dump(mode="json")
+
+    brand.workspace_saved_execution_id = body.saved_execution_id
+    brand.workspace_delivery = body.delivery.model_dump(mode="json")
+    await db.flush()
+    brand = await _get_brand_or_404(brand.id, db, with_assets=True)
+    return await _build_brand_workspace_response(brand, db)
 
 
 @router.post(
@@ -530,6 +734,17 @@ async def save_brand_creative_execution(
     db.add(record)
     await db.flush()
     await db.refresh(record)
+
+    brand.workspace_selected_concept_id = body.concept.id
+    brand.workspace_selected_asset_ids = list(body.concept.asset_ids)
+    brand.workspace_execution = body.execution.model_dump(mode="json")
+    brand.workspace_saved_execution_id = record.id
+    brand.workspace_delivery = {
+        **_sanitize_workspace_delivery(brand.workspace_delivery),
+        "delivery_mode": body.delivery_mode,
+        "destination_label": body.destination_label,
+    }
+    await db.flush()
 
     service = _get_creative_studio_service()
     return service.serialize_saved_execution(record)
@@ -780,6 +995,20 @@ async def publish_brand_creative_execution(
         record.status = "queued"
     else:
         record.status = "published"
+
+    workspace_brand = record.brand or await _get_brand_or_404(brand_id, db, with_assets=True)
+    workspace_brand.workspace_saved_execution_id = record.id
+    workspace_brand.workspace_execution = jsonable_encoder(record.execution)
+    workspace_brand.workspace_delivery = {
+        **_sanitize_workspace_delivery(workspace_brand.workspace_delivery),
+        "delivery_mode": record.delivery_mode,
+        "destination_label": record.destination_label,
+        "publish_title": body.title,
+        "content_override": body.content_override,
+        "selected_late_account_ids": list(body.account_ids),
+        "publish_mode": body.mode,
+        "scheduled_for": body.scheduled_for,
+    }
     await db.flush()
     await db.refresh(record)
 

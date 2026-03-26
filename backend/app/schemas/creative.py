@@ -8,6 +8,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.brand import BrandProfile
+
 
 class CreativeBrief(BaseModel):
     """High-level creative direction derived from a brand profile."""
@@ -198,3 +200,33 @@ class PublishSavedCreativeExecutionResponse(BaseModel):
     remote_post_status: str | None = None
     remote_post_url: str | None = None
     message: str = ""
+
+
+class WorkspaceDeliveryState(BaseModel):
+    delivery_mode: str = "late_dev"
+    destination_label: str | None = None
+    publish_title: str | None = None
+    content_override: str | None = None
+    selected_late_account_ids: list[str] = Field(default_factory=list)
+    publish_mode: Literal["draft", "publish_now", "schedule"] = "publish_now"
+    scheduled_for: datetime | None = None
+
+
+class BrandWorkspaceResponse(BaseModel):
+    brand: BrandProfile
+    studio: CreativeStudioResponse | None = None
+    selected_concept_id: str | None = None
+    selected_asset_ids: list[str] = Field(default_factory=list)
+    execution: CreativeExecutionResponse | None = None
+    saved_execution_id: uuid.UUID | None = None
+    delivery: WorkspaceDeliveryState = Field(default_factory=WorkspaceDeliveryState)
+    saved_executions: list[SavedCreativeExecutionSummary] = Field(default_factory=list)
+
+
+class BrandWorkspaceUpdate(BaseModel):
+    studio: CreativeStudioResponse | None = None
+    selected_concept_id: str | None = None
+    selected_asset_ids: list[str] = Field(default_factory=list)
+    execution: CreativeExecutionResponse | None = None
+    saved_execution_id: uuid.UUID | None = None
+    delivery: WorkspaceDeliveryState = Field(default_factory=WorkspaceDeliveryState)

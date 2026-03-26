@@ -151,6 +151,11 @@ class BrandProfile(BaseModel):
     assets: list[BrandAssetSummary] = []
     asset_count: int = 0
     usable_asset_count: int = 0
+    saved_execution_count: int = 0
+    published_execution_count: int = 0
+    active_execution_status: str | None = None
+    active_execution_updated_at: datetime | None = None
+    active_execution_last_error: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -167,6 +172,11 @@ class BrandListItem(BaseModel):
     industry: str | None = None
     analysis_status: str
     asset_count: int = 0
+    saved_execution_count: int = 0
+    published_execution_count: int = 0
+    active_execution_status: str | None = None
+    active_execution_updated_at: datetime | None = None
+    active_execution_last_error: str | None = None
     created_at: datetime
 
 
