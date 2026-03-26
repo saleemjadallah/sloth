@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+if TYPE_CHECKING:
+    from app.models.campaign import Campaign
+    from app.models.brand import Brand
 
 
 class CreativeExecution(Base):
@@ -27,6 +32,12 @@ class CreativeExecution(Base):
         UUID(as_uuid=True),
         ForeignKey("brands.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
+    )
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("campaigns.id", ondelete="SET NULL"),
+        nullable=True,
         index=True,
     )
     concept_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
@@ -91,7 +102,8 @@ class CreativeExecution(Base):
         nullable=True,
     )
 
-    brand: Mapped["Brand"] = relationship(back_populates="creative_executions")  # noqa: F821
+    brand: Mapped["Brand"] = relationship(back_populates="creative_executions")
+    campaign: Mapped["Campaign | None"] = relationship(back_populates="creative_executions")
 
     def __repr__(self) -> str:
         return f"<CreativeExecution id={self.id!s} concept_name={self.concept_name!r}>"

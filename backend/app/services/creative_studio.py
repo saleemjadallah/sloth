@@ -714,6 +714,7 @@ class CreativeStudioService:
         return {
             "id": record.id,
             "brand_id": record.brand_id,
+            "campaign_id": record.campaign_id,
             "concept_id": record.concept_id,
             "concept_name": record.concept_name,
             "summary": record.summary,
@@ -741,6 +742,7 @@ class CreativeStudioService:
         return {
             "id": record.id,
             "brand_id": record.brand_id,
+            "campaign_id": record.campaign_id,
             "concept_id": record.concept_id,
             "concept_name": record.concept_name,
             "summary": record.summary,

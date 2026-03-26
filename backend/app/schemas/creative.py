@@ -130,6 +130,7 @@ class SavedCreativeExecutionSummary(BaseModel):
 
     id: uuid.UUID
     brand_id: uuid.UUID
+    campaign_id: uuid.UUID | None = None
     concept_id: str
     concept_name: str
     summary: str
@@ -150,6 +151,7 @@ class SavedCreativeExecutionResponse(BaseModel):
 
     id: uuid.UUID
     brand_id: uuid.UUID
+    campaign_id: uuid.UUID | None = None
     concept_id: str
     concept_name: str
     summary: str

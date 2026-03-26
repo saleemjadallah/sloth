@@ -15,6 +15,7 @@ from app.database import Base
 
 if TYPE_CHECKING:
     from app.models.brand_asset import BrandAsset
+    from app.models.campaign import Campaign
     from app.models.creative_execution import CreativeExecution
 
 
@@ -89,6 +90,11 @@ class Brand(Base):
         lazy="selectin",
     )
     creative_executions: Mapped[list["CreativeExecution"]] = relationship(
+        back_populates="brand",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    campaigns: Mapped[list["Campaign"]] = relationship(
         back_populates="brand",
         cascade="all, delete-orphan",
         lazy="selectin",

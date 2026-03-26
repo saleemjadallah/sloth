@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.routes.campaigns import router as campaigns_router
 from app.routes.brands import router as brands_router
 from app.services.asset_storage import AssetStorage
 
@@ -50,6 +51,7 @@ app.add_middleware(
 # ── Routers ─────────────────────────────────────────────────────────────
 
 app.include_router(brands_router)
+app.include_router(campaigns_router)
 
 asset_storage = AssetStorage.from_settings()
 
