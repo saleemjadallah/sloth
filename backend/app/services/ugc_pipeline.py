@@ -68,6 +68,7 @@ class FalAIService:
     ) -> dict[str, Any]:
         """Submit a fal.ai queue job and poll until completion."""
         submit_url = f"{self.BASE_URL}/{endpoint}"
+        logger.info("Submitting fal.ai job to %s", submit_url)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Submit
@@ -90,10 +91,11 @@ class FalAIService:
             request_id = envelope.get("request_id")
             if not request_id:
                 raise UgcPipelineError(f"fal.ai submit returned no request_id for {endpoint}")
+            logger.info("fal.ai job submitted: %s (request_id=%s)", endpoint, request_id)
 
-        # Poll
-        status_url = f"https://queue.fal.run/{endpoint}/requests/{request_id}/status"
-        result_url = f"https://queue.fal.run/{endpoint}/requests/{request_id}"
+        # Poll using the response_url if provided, otherwise construct URLs
+        status_url = envelope.get("status_url") or f"{self.BASE_URL}/{endpoint}/requests/{request_id}/status"
+        response_url = envelope.get("response_url") or f"{self.BASE_URL}/{endpoint}/requests/{request_id}"
 
         elapsed = 0
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -102,18 +104,28 @@ class FalAIService:
                 elapsed += poll_interval_seconds
 
                 status_resp = await client.get(status_url, headers=self._headers())
-                status_resp.raise_for_status()
-                status_data = status_resp.json()
-                status = status_data.get("status", "")
+                if status_resp.status_code >= 400:
+                    logger.warning(
+                        "fal.ai status poll failed (%s) for %s: %s",
+                        status_resp.status_code, endpoint, status_resp.text[:200],
+                    )
+                    continue  # retry on transient errors
+                try:
+                    status_data = status_resp.json()
+                except Exception:
+                    logger.warning("fal.ai status returned non-JSON: %s", status_resp.text[:200])
+                    continue
+                poll_status = status_data.get("status", "")
 
-                if status == "COMPLETED":
-                    result_resp = await client.get(result_url, headers=self._headers())
+                if poll_status == "COMPLETED":
+                    result_resp = await client.get(response_url, headers=self._headers())
                     result_resp.raise_for_status()
                     return result_resp.json()
-                elif status == "FAILED":
+                elif poll_status == "FAILED":
                     error = status_data.get("error", "Unknown fal.ai error")
                     raise UgcPipelineError(f"fal.ai job failed for {endpoint}: {error}")
                 # IN_QUEUE or IN_PROGRESS — keep polling
+                logger.info("fal.ai %s: %s (elapsed %ds)", endpoint, poll_status, elapsed)
 
         raise UgcPipelineError(f"fal.ai job timed out after {timeout_seconds}s for {endpoint}")
 
