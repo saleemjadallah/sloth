@@ -76,8 +76,17 @@ class FalAIService:
                 headers=self._headers(),
                 json=arguments,
             )
-            resp.raise_for_status()
-            envelope = resp.json()
+            if resp.status_code >= 400:
+                body = resp.text[:500]
+                raise UgcPipelineError(
+                    f"fal.ai submit failed ({resp.status_code}) for {endpoint}: {body}"
+                )
+            try:
+                envelope = resp.json()
+            except Exception:
+                raise UgcPipelineError(
+                    f"fal.ai submit returned non-JSON for {endpoint}: {resp.text[:500]}"
+                )
             request_id = envelope.get("request_id")
             if not request_id:
                 raise UgcPipelineError(f"fal.ai submit returned no request_id for {endpoint}")
@@ -117,6 +126,7 @@ class FalAIService:
 
     async def upload_file(self, data: bytes, content_type: str, file_name: str) -> str:
         """Upload a file to fal.ai CDN storage and return a public URL."""
+        logger.info("Uploading %s (%d bytes, %s) to fal.ai CDN", file_name, len(data), content_type)
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
                 "https://fal.media/files/upload",
@@ -127,11 +137,21 @@ class FalAIService:
                 },
                 content=data,
             )
-            resp.raise_for_status()
-            result = resp.json()
+            if resp.status_code >= 400:
+                body = resp.text[:500]
+                raise UgcPipelineError(
+                    f"fal.ai upload failed ({resp.status_code}) for {file_name}: {body}"
+                )
+            try:
+                result = resp.json()
+            except Exception:
+                raise UgcPipelineError(
+                    f"fal.ai upload returned non-JSON for {file_name}: {resp.text[:300]}"
+                )
             url = result.get("access_url", "") or result.get("url", "")
             if not url:
-                raise UgcPipelineError("fal.ai file upload returned no URL")
+                raise UgcPipelineError(f"fal.ai upload returned no URL for {file_name}: {result}")
+            logger.info("Uploaded %s → %s", file_name, url)
             return url
 
     # ── Flux.1 composite ────────────────────────────────────────────────
