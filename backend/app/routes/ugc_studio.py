@@ -166,6 +166,12 @@ async def generate_video(
             detail="FAL_API_KEY is not configured.",
         )
 
+    if not body.avatar.image_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Avatar has no image. Upload a custom avatar portrait first.",
+        )
+
     job_id = uuid.uuid4().hex[:12]
     storage_prefix = f"assets/{body.brand_id}/ugc/{job_id}"
 

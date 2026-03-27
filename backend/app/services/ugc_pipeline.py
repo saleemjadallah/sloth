@@ -723,6 +723,11 @@ class UgcPipelineService:
         If it's already an HTTP URL, return as-is.
         If it's a local storage key, read the file and upload to fal.ai storage.
         """
+        if not url_or_key:
+            raise UgcPipelineError(
+                f"No image URL provided for {file_name}. "
+                "Upload a custom avatar portrait — built-in avatars need image files."
+            )
         if url_or_key.startswith("http"):
             return url_or_key
         # It's a local storage key — read and upload to fal.ai
