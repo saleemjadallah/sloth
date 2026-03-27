@@ -148,23 +148,38 @@ class VeoVideoService:
         raise VideoPipelineError("Timed out waiting for Veo render operation to complete.")
 
     @staticmethod
-    def extract_video_gcs_uri(result: dict[str, Any]) -> str:
-        candidates = [
-            result.get("response", {}).get("videos"),
-            result.get("response", {}).get("predictions", [{}])[0].get("videos"),
-            result.get("predictions", [{}])[0].get("videos"),
-            result.get("response", {}).get("generateVideoResponse", {}).get("videos"),
-        ]
-        for videos in candidates:
-            if isinstance(videos, list) and videos:
-                candidate = videos[0]
-                if isinstance(candidate, dict) and candidate.get("gcsUri"):
-                    return str(candidate["gcsUri"])
+    def _walk_media_nodes(node: Any) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        if isinstance(node, dict):
+            if node.get("gcsUri") or node.get("bytesBase64Encoded"):
+                matches.append(node)
+            for value in node.values():
+                matches.extend(VeoVideoService._walk_media_nodes(value))
+        elif isinstance(node, list):
+            for item in node:
+                matches.extend(VeoVideoService._walk_media_nodes(item))
+        return matches
+
+    @classmethod
+    def extract_video_payload(cls, result: dict[str, Any]) -> dict[str, Any]:
+        for candidate in cls._walk_media_nodes(result):
+            if candidate.get("gcsUri"):
+                return {
+                    "gcs_uri": str(candidate["gcsUri"]),
+                    "bytes": None,
+                    "mime_type": str(candidate.get("mimeType") or "video/mp4"),
+                }
+            if candidate.get("bytesBase64Encoded"):
+                return {
+                    "gcs_uri": None,
+                    "bytes": base64.b64decode(str(candidate["bytesBase64Encoded"])),
+                    "mime_type": str(candidate.get("mimeType") or "video/mp4"),
+                }
         if result.get("response", {}).get("raiMediaFilteredCount", 0) > 0:
             reasons = result.get("response", {}).get("raiMediaFilteredReasons") or []
             joined = ", ".join(reasons) if isinstance(reasons, list) else "unknown"
             raise VideoPipelineError(f"Veo output was filtered by safety policies: {joined}")
-        raise VideoPipelineError("Veo completed without returning a video GCS URI.")
+        raise VideoPipelineError("Veo completed without returning video media in the operation payload.")
 
     async def generate(
         self,
@@ -1089,19 +1104,30 @@ class VideoPipelineService:
             operation_name=str(operation_name),
             model_id=model_id,
         )
-        video_gcs_uri = self._veo.extract_video_gcs_uri(result)
-        video_bytes = await self._veo.download_gcs_uri(video_gcs_uri)
+        video_payload = self._veo.extract_video_payload(result)
+        video_gcs_uri = video_payload.get("gcs_uri")
+        if video_gcs_uri:
+            video_bytes = await self._veo.download_gcs_uri(str(video_gcs_uri))
+            mime_type = str(video_payload.get("mime_type") or "video/mp4")
+            source_note = "downloaded from GCS"
+        else:
+            inline_bytes = video_payload.get("bytes")
+            if not isinstance(inline_bytes, bytes) or not inline_bytes:
+                raise VideoPipelineError("Veo returned inline video data, but it could not be decoded.")
+            video_bytes = inline_bytes
+            mime_type = str(video_payload.get("mime_type") or "video/mp4")
+            source_note = "decoded from inline response bytes"
         artifact = RenderedBinary(
             kind="scene_video",
             label=str(scene.get("title") or f"Scene {scene_index + 1}"),
             data=video_bytes,
-            mime_type="video/mp4",
+            mime_type=mime_type,
             file_name=f"scene-{scene_index + 1:02d}.mp4",
-            source_gcs_uri=video_gcs_uri,
+            source_gcs_uri=str(video_gcs_uri) if video_gcs_uri else None,
             scene_id=str(scene.get("id") or f"scene-{scene_index + 1}"),
         )
-        scene_logs.append(f"Scene {scene_index + 1}: render completed and video downloaded from GCS.")
-        return {"artifact": artifact, "video_gcs_uri": video_gcs_uri, "logs": scene_logs}
+        scene_logs.append(f"Scene {scene_index + 1}: render completed and video was {source_note}.")
+        return {"artifact": artifact, "video_gcs_uri": str(video_gcs_uri) if video_gcs_uri else None, "logs": scene_logs}
 
     def _build_generation_parameters(
         self,
