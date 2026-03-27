@@ -38,12 +38,16 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     GOOGLE_API_KEY: str = ""
+    GOOGLE_CREDENTIALS_JSON: str = ""
     VEO_PROJECT_ID: str = ""
     VEO_ACCESS_TOKEN: str = ""
     VEO_GCS_BUCKET: str = ""
     VEO_LOCATION: str = "us-central1"
     VEO_MODEL_ID: str = "veo-3.1-generate-preview"
-    TTS_VOICE_NAME: str = "en-US-Chirp3-HD-Achernar"
+    TTS_VOICE_NAME: str = "en-US-Studio-O"
+    TTS_PITCH: float = 0.0
+    TTS_EFFECTS_PROFILE_ID: str = "headphone-class-device"
+    TTS_MAX_SCRIPT_CHARS: int = 50000
 
     # ── Scraping ────────────────────────────────────────────────────────
     FIRECRAWL_API_KEY: str = ""

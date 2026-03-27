@@ -561,8 +561,11 @@ def _get_video_pipeline_service(runtime: VideoRenderRuntimeConfig) -> VideoPipel
             default_model_id=settings.VEO_MODEL_ID,
         ),
         tts=GoogleTTSService(
-            project_id=project_id,
-            access_token=access_token,
+            credentials_json=settings.GOOGLE_CREDENTIALS_JSON,
+            default_voice_name=settings.TTS_VOICE_NAME,
+            default_pitch=settings.TTS_PITCH,
+            default_effects_profile_id=settings.TTS_EFFECTS_PROFILE_ID,
+            max_script_chars=settings.TTS_MAX_SCRIPT_CHARS,
         ),
         music=MubertMusicService(
             company_id=settings.MUBERT_COMPANY_ID,

@@ -131,8 +131,10 @@ class VideoRenderSettings(BaseModel):
     create_music: bool = False
     compose_final: bool = True
     stitch_scenes: bool = True
-    tts_voice_name: str = "en-US-Chirp3-HD-Achernar"
+    tts_voice_name: str = "en-US-Studio-O"
     tts_speaking_rate: float = 1.0
+    tts_pitch: float = 0.0
+    tts_effects_profile_id: str = "headphone-class-device"
     music_prompt: str = ""
     music_intensity: str = "medium"
     music_mode: str = "track"

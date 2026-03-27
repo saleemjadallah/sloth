@@ -12,7 +12,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 import mimetypes
+import os
 import subprocess
 import tempfile
 import uuid
@@ -22,6 +24,8 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.oauth2 import service_account
 
 from app.services.asset_storage import AssetStorage
 
@@ -220,15 +224,72 @@ class VeoVideoService:
 
 
 class GoogleTTSService:
-    """Google Cloud TTS helper using the same OAuth token model as Vertex."""
+    """Google Cloud TTS helper backed by service-account credentials."""
 
-    def __init__(self, *, project_id: str, access_token: str) -> None:
-        self._project_id = project_id.strip()
-        self._access_token = access_token.strip()
+    SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
+
+    def __init__(
+        self,
+        *,
+        credentials_json: str = "",
+        credentials_path: str | None = None,
+        default_voice_name: str = "en-US-Studio-O",
+        default_pitch: float = 0.0,
+        default_effects_profile_id: str = "headphone-class-device",
+        max_script_chars: int = 50000,
+    ) -> None:
+        self._credentials_json = credentials_json.strip()
+        self._credentials_path = (credentials_path or os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
+        self._default_voice_name = default_voice_name.strip() or "en-US-Studio-O"
+        self._default_pitch = float(default_pitch)
+        self._default_effects_profile_id = (
+            default_effects_profile_id.strip() or "headphone-class-device"
+        )
+        self._max_script_chars = max(1000, int(max_script_chars or 50000))
 
     @property
     def configured(self) -> bool:
-        return bool(self._project_id and self._access_token)
+        return bool(self._credentials_json or self._credentials_path)
+
+    @property
+    def default_voice_name(self) -> str:
+        return self._default_voice_name
+
+    def _load_credentials(self) -> service_account.Credentials:
+        if self._credentials_json:
+            payload = json.loads(self._credentials_json)
+            return service_account.Credentials.from_service_account_info(
+                payload,
+                scopes=self.SCOPES,
+            )
+        if self._credentials_path:
+            return service_account.Credentials.from_service_account_file(
+                self._credentials_path,
+                scopes=self.SCOPES,
+            )
+        raise VideoPipelineError(
+            "Google TTS is not configured. Set GOOGLE_CREDENTIALS_JSON or GOOGLE_APPLICATION_CREDENTIALS."
+        )
+
+    async def _resolve_access_token(self) -> tuple[str, str | None]:
+        credentials = await asyncio.to_thread(self._load_credentials)
+
+        def _refresh() -> tuple[str, str | None]:
+            scoped = credentials.with_scopes(self.SCOPES) if credentials.requires_scopes else credentials
+            scoped.refresh(GoogleAuthRequest())
+            return str(scoped.token or ""), scoped.project_id
+
+        token, project_id = await asyncio.to_thread(_refresh)
+        if not token:
+            raise VideoPipelineError("Google TTS credentials could not mint an access token.")
+        return token, project_id
+
+    @staticmethod
+    def _language_code_for_voice(voice_name: str) -> str:
+        parts = [part for part in voice_name.split("-") if part]
+        if len(parts) >= 2:
+            return "-".join(parts[:2])
+        return "en-US"
 
     async def synthesize(
         self,
@@ -236,23 +297,48 @@ class GoogleTTSService:
         script: str,
         voice_name: str,
         speaking_rate: float,
+        pitch: float | None = None,
+        effects_profile_id: str | None = None,
     ) -> bytes:
+        normalized_script = script.strip()
+        if not normalized_script:
+            raise VideoPipelineError("Voiceover was requested but the script is empty.")
+        if len(normalized_script) > self._max_script_chars:
+            raise VideoPipelineError(
+                f"Voiceover script exceeds the {self._max_script_chars:,}-character safety limit."
+            )
+
+        access_token, project_id = await self._resolve_access_token()
+        resolved_voice_name = voice_name.strip() or self._default_voice_name
+        resolved_speaking_rate = min(max(float(speaking_rate or 1.0), 0.5), 2.0)
+        resolved_pitch = min(max(float(self._default_pitch if pitch is None else pitch), -20.0), 20.0)
+        resolved_effects_profile_id = (
+            effects_profile_id.strip()
+            if isinstance(effects_profile_id, str) and effects_profile_id.strip()
+            else self._default_effects_profile_id
+        )
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+        if project_id:
+            headers["X-Goog-User-Project"] = project_id
+
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
                 "https://texttospeech.googleapis.com/v1/text:synthesize",
-                headers={
-                    "Authorization": f"Bearer {self._access_token}",
-                    "Content-Type": "application/json",
-                    "X-Goog-User-Project": self._project_id,
-                },
+                headers=headers,
                 json={
-                    "input": {"text": script},
-                    "voice": {"languageCode": "en-US", "name": voice_name},
+                    "input": {"text": normalized_script},
+                    "voice": {
+                        "languageCode": self._language_code_for_voice(resolved_voice_name),
+                        "name": resolved_voice_name,
+                    },
                     "audioConfig": {
                         "audioEncoding": "MP3",
-                        "speakingRate": speaking_rate,
-                        "pitch": 0,
-                        "effectsProfileId": ["large-home-entertainment-class-device"],
+                        "speakingRate": resolved_speaking_rate,
+                        "pitch": resolved_pitch,
+                        "effectsProfileId": [resolved_effects_profile_id],
                     },
                 },
             )
@@ -562,8 +648,10 @@ class VideoPipelineService:
         "create_music": False,
         "compose_final": True,
         "stitch_scenes": True,
-        "tts_voice_name": "en-US-Chirp3-HD-Achernar",
+        "tts_voice_name": "en-US-Studio-O",
         "tts_speaking_rate": 1.0,
+        "tts_pitch": 0.0,
+        "tts_effects_profile_id": "headphone-class-device",
         "music_prompt": "",
         "music_intensity": "medium",
         "music_mode": "track",
@@ -673,12 +761,19 @@ class VideoPipelineService:
         if settings.get("create_voiceover"):
             if not self._tts.configured:
                 raise VideoPipelineError(
-                    "Voiceover was requested but Google TTS is not configured with a project id and access token."
+                    "Voiceover was requested but Google TTS is not configured with backend credentials."
                 )
-            voiceover_bytes = await self._tts.synthesize(
-                script=str(execution.get("video_brief", {}).get("voiceover_script") or "").strip(),
-                voice_name=str(settings.get("tts_voice_name") or self.DEFAULT_SETTINGS["tts_voice_name"]),
+            voiceover_script = str(execution.get("video_brief", {}).get("voiceover_script") or "").strip()
+            estimated_voiceover_seconds = self.estimate_voiceover_duration_seconds(
+                script=voiceover_script,
                 speaking_rate=float(settings.get("tts_speaking_rate") or 1.0),
+            )
+            voiceover_bytes = await self._tts.synthesize(
+                script=voiceover_script,
+                voice_name=str(settings.get("tts_voice_name") or self._tts.default_voice_name),
+                speaking_rate=float(settings.get("tts_speaking_rate") or 1.0),
+                pitch=float(settings.get("tts_pitch") or 0.0),
+                effects_profile_id=str(settings.get("tts_effects_profile_id") or ""),
             )
             voiceover_artifact = RenderedBinary(
                 kind="voiceover",
@@ -687,7 +782,9 @@ class VideoPipelineService:
                 mime_type="audio/mpeg",
                 file_name="voiceover.mp3",
             )
-            logs.append("Generated voiceover narration from the execution script.")
+            logs.append(
+                f"Generated voiceover narration from the execution script (~{estimated_voiceover_seconds}s at the selected speaking rate)."
+            )
 
         music_artifact: RenderedBinary | None = None
         if settings.get("create_music"):
@@ -699,7 +796,12 @@ class VideoPipelineService:
                 brand_name=brand_name,
                 execution=execution,
             )
+            voiceover_duration_seconds = self.estimate_voiceover_duration_seconds(
+                script=str(execution.get("video_brief", {}).get("voiceover_script") or "").strip(),
+                speaking_rate=float(settings.get("tts_speaking_rate") or 1.0),
+            )
             duration_seconds = max(
+                voiceover_duration_seconds,
                 int(settings.get("scene_duration_seconds") or 8) * max(1, len(enabled_scenes)),
                 8,
             )
@@ -759,6 +861,14 @@ class VideoPipelineService:
             final_video=final_artifact,
         )
 
+    @staticmethod
+    def estimate_voiceover_duration_seconds(*, script: str, speaking_rate: float) -> int:
+        words = len([part for part in script.split() if part.strip()])
+        if words == 0:
+            return 0
+        normalized_rate = min(max(float(speaking_rate or 1.0), 0.5), 2.0)
+        return max(1, int(math.ceil((words / 150.0) * 60.0 / normalized_rate)))
+
     def build_scene_plan(
         self,
         *,
@@ -799,16 +909,14 @@ class VideoPipelineService:
 
         scenes: list[dict[str, Any]] = []
         for index, beat in enumerate(shot_list, start=1):
-            continuity = "Maintain the same subject identity, styling, lighting continuity, and brand cues."
-            scene_prompt = " ".join(
-                part
-                for part in [
-                    base_prompt,
-                    f"Scene {index}: {beat}.",
-                    continuity,
-                    "Keep the framing optimized for short-form paid social performance.",
-                ]
-                if part
+            scene_prompt = self._build_scene_prompt(
+                master_prompt=base_prompt,
+                shot=beat,
+                scene_index=index,
+                total_scenes=len(shot_list),
+                concept_name=concept_name,
+                opening_shot=str(video_brief.get("opening_shot") or "").strip(),
+                end_frame=str(video_brief.get("end_frame") or "").strip(),
             )
             scenes.append(
                 {
@@ -836,6 +944,75 @@ class VideoPipelineService:
                 "concept_name": concept_name,
             }
         ]
+
+    @staticmethod
+    def _split_prompt_sentences(prompt: str) -> list[str]:
+        normalized = prompt.replace("\n", " ").strip()
+        if not normalized:
+            return []
+        return [part.strip() for part in normalized.split(". ") if part.strip()]
+
+    def _extract_shared_video_theme(self, master_prompt: str) -> str:
+        sentences = self._split_prompt_sentences(master_prompt)
+        if not sentences:
+            return master_prompt.strip()
+
+        shared = [
+            sentence.rstrip(".")
+            for sentence in sentences
+            if not any(
+                marker in sentence.lower()
+                for marker in (
+                    "scene ",
+                    "start ",
+                    "begin ",
+                    "pull back",
+                    "pan ",
+                    "cut to",
+                    "close on",
+                    "end with",
+                    "opening shot",
+                    "final shot",
+                    "camera move",
+                )
+            )
+        ]
+        selected = shared[:3] if shared else [sentence.rstrip(".") for sentence in sentences[:2]]
+        return ". ".join(selected).strip()
+
+    def _build_scene_prompt(
+        self,
+        *,
+        master_prompt: str,
+        shot: str,
+        scene_index: int,
+        total_scenes: int,
+        concept_name: str,
+        opening_shot: str,
+        end_frame: str,
+    ) -> str:
+        shared_theme = self._extract_shared_video_theme(master_prompt)
+        if total_scenes <= 1:
+            stage_direction = f"Build the full scene around {shot}."
+        elif scene_index == 1:
+            stage_direction = f"Use this scene to establish the hook with {opening_shot or shot}."
+        elif scene_index == total_scenes:
+            stage_direction = f"Use this scene to land the payoff and transition cleanly into {end_frame or shot}."
+        else:
+            stage_direction = f"Use this scene to advance the story with a focused beat around {shot}."
+
+        return " ".join(
+            part
+            for part in [
+                f"Create scene {scene_index} of {total_scenes} for {concept_name}." if concept_name else "",
+                f"Shared creative direction: {shared_theme}." if shared_theme else "",
+                f"This scene should focus specifically on: {shot}.",
+                stage_direction,
+                "Maintain the same subject identity, styling, lighting continuity, and brand cues.",
+                "Keep the framing optimized for short-form paid social performance.",
+            ]
+            if part
+        )
 
     async def persist_artifact(
         self,
