@@ -37,6 +37,8 @@ from app.schemas.creative import (
     BrandWorkspaceUpdate,
     CreativeExecutionRequest,
     CreativeExecutionResponse,
+    CreativeVideoRenderRequest,
+    CreativeVideoRenderResponse,
     CreativeStudioResponse,
     LateAccountResponse,
     PublishSavedCreativeExecutionRequest,
@@ -44,6 +46,7 @@ from app.schemas.creative import (
     SavedCreativeExecutionCreate,
     SavedCreativeExecutionResponse,
     SavedCreativeExecutionSummary,
+    VideoRenderRuntimeConfig,
 )
 from app.services.asset_classifier import AssetClassifier
 from app.services.asset_extractor import AssetExtractor
@@ -54,6 +57,14 @@ from app.services.firecrawl_service import FirecrawlService
 from app.services.image_variation import ImageVariationService
 from app.services.late_service import LateService
 from app.services.llm_service import LLMService
+from app.services.video_pipeline import (
+    GoogleTTSService,
+    MediaComposerService,
+    MubertMusicService,
+    VeoVideoService,
+    VideoPipelineError,
+    VideoPipelineService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -528,6 +539,40 @@ def _get_late_service() -> LateService:
     )
 
 
+def _get_video_pipeline_service(runtime: VideoRenderRuntimeConfig) -> VideoPipelineService:
+    """Build the integrated Veo/TTS/music pipeline from request-scoped runtime config."""
+    project_id = runtime.project_id.strip()
+    access_token = runtime.access_token.strip()
+    gcs_bucket = runtime.gcs_bucket.strip()
+    location = runtime.location.strip() or "us-central1"
+
+    if not project_id or not access_token or not gcs_bucket:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project ID, access token, and GCS bucket are required to render video.",
+        )
+
+    return VideoPipelineService(
+        veo=VeoVideoService(
+            project_id=project_id,
+            access_token=access_token,
+            gcs_bucket=gcs_bucket,
+            location=location,
+            default_model_id=settings.VEO_MODEL_ID,
+        ),
+        tts=GoogleTTSService(
+            project_id=project_id,
+            access_token=access_token,
+        ),
+        music=MubertMusicService(
+            company_id=settings.MUBERT_COMPANY_ID,
+            license_token=settings.MUBERT_LICENSE_TOKEN,
+        ),
+        composer=MediaComposerService(),
+        storage=AssetStorage.from_settings(),
+    )
+
+
 async def _get_brand_or_404(
     brand_id: uuid.UUID,
     db: AsyncSession,
@@ -854,6 +899,174 @@ async def create_brand_creative_execution(
     brand.workspace_saved_execution_id = None
     await db.flush()
     return execution
+
+
+@router.post(
+    "/{brand_id}/creative-execution/video-render",
+    response_model=CreativeVideoRenderResponse,
+    summary="Render a Veo/TTS/music video pipeline for the current execution pack",
+)
+async def render_brand_creative_execution_video(
+    brand_id: uuid.UUID,
+    body: CreativeVideoRenderRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """Render the current execution pack into scene videos and a final composed asset."""
+    brand = await _get_brand_or_404(brand_id, db, with_assets=True)
+    selected_ids = {str(asset_id) for asset_id in body.selected_asset_ids}
+    selected_assets = [
+        {
+            "id": str(asset.id),
+            "stored_url": asset.stored_url,
+            "source_url": asset.source_url,
+            "mime_type": asset.mime_type,
+            "description": asset.description,
+            "category": asset.category,
+        }
+        for asset in (brand.assets or [])
+        if str(asset.id) in selected_ids
+    ]
+
+    pipeline = _get_video_pipeline_service(body.runtime)
+    render_session_id = f"video-render-{uuid.uuid4().hex[:12]}"
+    execution_payload = body.execution.model_dump(mode="json")
+
+    try:
+        result = await pipeline.render_execution(
+            brand_name=brand.name or brand.website_url,
+            execution=execution_payload,
+            selected_assets=selected_assets,
+            storage_prefix=f"{brand_id}/{render_session_id}",
+            regenerate_scenes=body.regenerate_scenes,
+        )
+    except VideoPipelineError as exc:
+        logger.exception("Execution video render failed for brand %s", brand_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+    created_assets: list[BrandAsset] = []
+    render_state = {**result.state, "scene_artifacts": []}
+
+    for index, artifact in enumerate(result.scene_videos, start=1):
+        stored = await pipeline.persist_artifact(
+            brand_id=str(brand.id),
+            storage_prefix=f"{render_session_id}/scenes/{index}",
+            artifact=artifact,
+        )
+        render_state["scene_artifacts"].append(
+            {
+                "kind": stored.kind,
+                "label": stored.label,
+                "stored_url": stored.stored_url,
+                "asset_id": None,
+                "mime_type": stored.mime_type,
+                "file_name": stored.file_name,
+                "source_gcs_uri": stored.source_gcs_uri,
+                "scene_id": stored.scene_id,
+            }
+        )
+
+    if result.stitched_video is not None:
+        stored = await pipeline.persist_artifact(
+            brand_id=str(brand.id),
+            storage_prefix=f"{render_session_id}/stitched",
+            artifact=result.stitched_video,
+        )
+        render_state["stitched_artifact"] = {
+            "kind": stored.kind,
+            "label": stored.label,
+            "stored_url": stored.stored_url,
+            "asset_id": None,
+            "mime_type": stored.mime_type,
+            "file_name": stored.file_name,
+            "source_gcs_uri": stored.source_gcs_uri,
+            "scene_id": stored.scene_id,
+        }
+
+    if result.voiceover is not None:
+        stored = await pipeline.persist_artifact(
+            brand_id=str(brand.id),
+            storage_prefix=f"{render_session_id}/audio",
+            artifact=result.voiceover,
+        )
+        render_state["voiceover_artifact"] = {
+            "kind": stored.kind,
+            "label": stored.label,
+            "stored_url": stored.stored_url,
+            "asset_id": None,
+            "mime_type": stored.mime_type,
+            "file_name": stored.file_name,
+            "source_gcs_uri": stored.source_gcs_uri,
+            "scene_id": stored.scene_id,
+        }
+
+    if result.music is not None:
+        stored = await pipeline.persist_artifact(
+            brand_id=str(brand.id),
+            storage_prefix=f"{render_session_id}/audio",
+            artifact=result.music,
+        )
+        render_state["music_artifact"] = {
+            "kind": stored.kind,
+            "label": stored.label,
+            "stored_url": stored.stored_url,
+            "asset_id": None,
+            "mime_type": stored.mime_type,
+            "file_name": stored.file_name,
+            "source_gcs_uri": stored.source_gcs_uri,
+            "scene_id": stored.scene_id,
+        }
+
+    if result.final_video is not None:
+        final_asset = await _persist_brand_asset(
+            db=db,
+            brand_id=brand.id,
+            storage=AssetStorage.from_settings(),
+            source_url="generated://video-pipeline",
+            file_name=f"{render_session_id}-final.mp4",
+            file_bytes=result.final_video.data,
+            mime_type=result.final_video.mime_type,
+            category="generated-video",
+            description=f"Rendered video for {body.execution.concept_name}",
+            tags=["generated-video", "veo", "rendered-execution"],
+            quality_score=9,
+            is_usable=True,
+            context=body.execution.video_brief.veo_prompt,
+            extraction_metadata={
+                "render_session_id": render_session_id,
+                "render_settings": render_state.get("settings"),
+                "render_provider": "vertex_veo",
+            },
+        )
+        created_assets.append(final_asset)
+        render_state["final_artifact"] = {
+            "kind": result.final_video.kind,
+            "label": result.final_video.label,
+            "stored_url": final_asset.stored_url,
+            "asset_id": str(final_asset.id),
+            "mime_type": final_asset.mime_type or result.final_video.mime_type,
+            "file_name": final_asset.file_name,
+            "source_gcs_uri": result.final_video.source_gcs_uri,
+            "scene_id": result.final_video.scene_id,
+        }
+
+    render_state["last_rendered_at"] = datetime.now(timezone.utc)
+    execution_payload["video_render"] = render_state
+    brand.workspace_execution = jsonable_encoder(execution_payload)
+    if created_assets:
+        existing_ids = [str(asset_id) for asset_id in (brand.workspace_selected_asset_ids or [])]
+        existing_ids.extend(str(asset.id) for asset in created_assets)
+        brand.workspace_selected_asset_ids = list(dict.fromkeys(existing_ids))
+    await db.flush()
+    for asset in created_assets:
+        await db.refresh(asset)
+
+    return {
+        "execution": execution_payload,
+        "created_assets": created_assets,
+    }
 
 
 @router.put(

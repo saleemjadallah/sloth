@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     GOOGLE_API_KEY: str = ""
+    VEO_PROJECT_ID: str = ""
+    VEO_ACCESS_TOKEN: str = ""
+    VEO_GCS_BUCKET: str = ""
+    VEO_LOCATION: str = "us-central1"
+    VEO_MODEL_ID: str = "veo-3.1-generate-preview"
+    TTS_VOICE_NAME: str = "en-US-Chirp3-HD-Achernar"
 
     # ── Scraping ────────────────────────────────────────────────────────
     FIRECRAWL_API_KEY: str = ""
@@ -46,6 +52,8 @@ class Settings(BaseSettings):
     ZERNIO_API_KEY: str = ""
     LATE_API_KEY: str = ""
     LATE_API_BASE_URL: str = "https://getlate.dev/api/v1"
+    MUBERT_COMPANY_ID: str = ""
+    MUBERT_LICENSE_TOKEN: str = ""
 
     # ── Cloudflare R2 (S3-compatible storage) ──────────────────────────
     R2_ENDPOINT: str = ""

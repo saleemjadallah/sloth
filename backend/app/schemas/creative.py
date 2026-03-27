@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.schemas.brand import BrandProfile
+from app.schemas.brand import BrandAssetResponse, BrandProfile
 
 
 class CreativeBrief(BaseModel):
@@ -95,6 +95,84 @@ class VideoBrief(BaseModel):
     veo_prompt: str
 
 
+class VideoScene(BaseModel):
+    """One renderable scene derived from a video brief."""
+
+    id: str
+    title: str
+    prompt: str
+    duration_seconds: int = 8
+    voiceover_text: str = ""
+    reference_asset_ids: list[str] = Field(default_factory=list)
+    enabled: bool = True
+    sequence_index: int = 0
+    concept_name: str = ""
+
+
+class VideoRenderSettings(BaseModel):
+    """Runtime settings for Veo/TTS/music generation."""
+
+    render_strategy: Literal["scene_sequence", "daisy_chain"] = "scene_sequence"
+    generation_mode: Literal[
+        "auto",
+        "prompt_only",
+        "image_to_video",
+        "reference_images",
+        "first_last_frame",
+    ] = "auto"
+    model_id: str = "veo-3.1-generate-preview"
+    aspect_ratio: Literal["9:16", "16:9"] = "9:16"
+    resolution: str = "1080p"
+    scene_duration_seconds: int = 8
+    negative_prompt: str = ""
+    seed: int | None = None
+    generate_native_audio: bool = False
+    create_voiceover: bool = True
+    create_music: bool = False
+    compose_final: bool = True
+    stitch_scenes: bool = True
+    tts_voice_name: str = "en-US-Chirp3-HD-Achernar"
+    tts_speaking_rate: float = 1.0
+    music_prompt: str = ""
+    music_intensity: str = "medium"
+    music_mode: str = "track"
+    music_format: str = "wav"
+    music_bitrate: int = 320
+    reference_asset_ids: list[str] = Field(default_factory=list)
+    first_frame_asset_id: str | None = None
+    last_frame_asset_id: str | None = None
+
+
+class VideoRenderArtifact(BaseModel):
+    """Stored media artifact emitted by the render pipeline."""
+
+    kind: str
+    label: str
+    stored_url: str | None = None
+    asset_id: str | None = None
+    mime_type: str = ""
+    file_name: str | None = None
+    source_gcs_uri: str | None = None
+    scene_id: str | None = None
+
+
+class VideoRenderState(BaseModel):
+    """Persisted render state attached to an execution pack."""
+
+    status: Literal["idle", "running", "completed", "failed"] = "idle"
+    provider: str = "vertex_veo"
+    settings: VideoRenderSettings = Field(default_factory=VideoRenderSettings)
+    scenes: list[VideoScene] = Field(default_factory=list)
+    logs: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    scene_artifacts: list[VideoRenderArtifact] = Field(default_factory=list)
+    stitched_artifact: VideoRenderArtifact | None = None
+    voiceover_artifact: VideoRenderArtifact | None = None
+    music_artifact: VideoRenderArtifact | None = None
+    final_artifact: VideoRenderArtifact | None = None
+    last_rendered_at: datetime | None = None
+
+
 class CreativeExecutionResponse(BaseModel):
     """Expanded execution pack for a selected concept."""
 
@@ -111,6 +189,7 @@ class CreativeExecutionResponse(BaseModel):
     channel_variants: list[ChannelVariant] = Field(default_factory=list)
     design_brief: DesignBrief
     video_brief: VideoBrief
+    video_render: VideoRenderState = Field(default_factory=VideoRenderState)
     production_checklist: list[str] = Field(default_factory=list)
 
 
@@ -233,3 +312,28 @@ class BrandWorkspaceUpdate(BaseModel):
     execution: CreativeExecutionResponse | None = None
     saved_execution_id: uuid.UUID | None = None
     delivery: WorkspaceDeliveryState = Field(default_factory=WorkspaceDeliveryState)
+
+
+class CreativeVideoRenderRequest(BaseModel):
+    """Request body for in-app video rendering."""
+
+    execution: CreativeExecutionResponse
+    selected_asset_ids: list[uuid.UUID] = Field(default_factory=list)
+    regenerate_scenes: bool = False
+    runtime: "VideoRenderRuntimeConfig"
+
+
+class CreativeVideoRenderResponse(BaseModel):
+    """Updated execution plus any created/persisted assets."""
+
+    execution: CreativeExecutionResponse
+    created_assets: list[BrandAssetResponse] = Field(default_factory=list)
+
+
+class VideoRenderRuntimeConfig(BaseModel):
+    """Short-lived runtime credentials provided by the frontend."""
+
+    project_id: str
+    access_token: str
+    gcs_bucket: str
+    location: str = "us-central1"
