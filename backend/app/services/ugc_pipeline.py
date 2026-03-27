@@ -116,12 +116,12 @@ class FalAIService:
             return resp.content
 
     async def upload_file(self, data: bytes, content_type: str, file_name: str) -> str:
-        """Upload a file to fal.ai storage and return a CDN URL."""
+        """Upload a file to fal.ai CDN storage and return a public URL."""
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
-                "https://fal.ai/api/storage/upload",
+                "https://fal.media/files/upload",
                 headers={
-                    "Authorization": f"Key {self._api_key}",
+                    "Authorization": f"Bearer {self._api_key}",
                     "Content-Type": content_type,
                     "X-Fal-File-Name": file_name,
                 },
@@ -129,7 +129,7 @@ class FalAIService:
             )
             resp.raise_for_status()
             result = resp.json()
-            url = result.get("url", "")
+            url = result.get("access_url", "") or result.get("url", "")
             if not url:
                 raise UgcPipelineError("fal.ai file upload returned no URL")
             return url
