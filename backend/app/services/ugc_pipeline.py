@@ -187,7 +187,7 @@ class FalAIService:
                 "image_url": avatar_image_url,
                 "ip_adapters": [
                     {
-                        "path": "XLabs-AI/flux-ip-adapter-v2",
+                        "path": "https://huggingface.co/XLabs-AI/flux-ip-adapter/resolve/main/flux-ip-adapter.safetensors?download=true",
                         "image_encoder_path": "openai/clip-vit-large-patch14",
                         "image_url": product_image_url,
                         "scale": 0.6,
