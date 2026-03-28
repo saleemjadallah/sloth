@@ -198,7 +198,7 @@ class FalAIService:
                 "image_size": "portrait_4_3",
                 "num_images": 1,
             },
-            timeout_seconds=120,
+            timeout_seconds=600,
         )
         images = result.get("images", [])
         if not images:
