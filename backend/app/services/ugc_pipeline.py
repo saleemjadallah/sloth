@@ -181,10 +181,14 @@ class FalAIService:
             {
                 "prompt": prompt,
                 "image_url": avatar_image_url,
-                "ip_adapter": {
-                    "image_url": product_image_url,
-                    "scale": 0.6,
-                },
+                "ip_adapters": [
+                    {
+                        "path": "XLabs-AI/flux-ip-adapter-v2",
+                        "image_encoder_path": "openai/clip-vit-large-patch14",
+                        "image_url": product_image_url,
+                        "scale": 0.6,
+                    }
+                ],
                 "guidance_scale": 7.5,
                 "num_inference_steps": 30,
                 "image_size": "portrait_4_3",
@@ -236,9 +240,10 @@ class FalAIService:
         result = await self.submit_and_poll(
             "fal-ai/kling-video/v3/pro/image-to-video",
             {
-                "image_url": product_image_url,
+                "start_image_url": product_image_url,
                 "prompt": prompt,
-                "duration": str(min(int(duration_seconds), 10)),
+                "duration": str(min(int(duration_seconds), 15)),
+                "generate_audio": False,
             },
             timeout_seconds=300,
             poll_interval_seconds=8,
