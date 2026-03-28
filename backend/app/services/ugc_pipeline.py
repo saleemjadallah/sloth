@@ -119,7 +119,11 @@ class FalAIService:
 
                 if poll_status == "COMPLETED":
                     result_resp = await client.get(response_url, headers=self._headers())
-                    result_resp.raise_for_status()
+                    if result_resp.status_code >= 400:
+                        body = result_resp.text[:500]
+                        raise UgcPipelineError(
+                            f"fal.ai result fetch failed ({result_resp.status_code}) for {endpoint}: {body}"
+                        )
                     return result_resp.json()
                 elif poll_status == "FAILED":
                     error = status_data.get("error", "Unknown fal.ai error")
