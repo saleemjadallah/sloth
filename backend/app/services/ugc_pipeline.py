@@ -418,11 +418,13 @@ class UgcPipelineService:
     ) -> UgcArtifact:
         """Create a reference image showing the avatar holding/using the product."""
         prompt = (
-            f"A half-body portrait of a person from the waist up, holding a {product_name} product "
-            f"in their hand in front of their chest, looking directly at the camera and smiling. "
-            f"The product is a separate physical object held in the person's hand, NOT part of the person's body. "
-            f"UGC selfie style, natural indoor lighting, social media ad aesthetic, "
-            f"the person's face, torso, arms, and hands are all clearly visible"
+            f"A half-body portrait of a person from the waist up, wearing a casual t-shirt, "
+            f"holding only a {product_name} in one hand near their chest, "
+            f"looking directly at the camera and smiling naturally. "
+            f"The person is NOT holding a phone, NOT wearing formal clothes or a suit. "
+            f"Simple clean background, UGC selfie style filmed on phone, "
+            f"natural indoor lighting, casual relaxed vibe, "
+            f"face torso arms and hands clearly visible"
         )
         data = await self._fal.generate_composite_image(
             avatar_image_url=avatar_image_url,
