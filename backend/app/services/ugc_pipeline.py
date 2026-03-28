@@ -232,9 +232,9 @@ class FalAIService:
         prompt: str,
         duration_seconds: float = 3.0,
     ) -> bytes:
-        """Kling O1 Reference-to-Video: product-only B-roll shot."""
+        """Kling v3 Pro: product-only B-roll shot."""
         result = await self.submit_and_poll(
-            "fal-ai/kling-video/v1/pro/image-to-video",
+            "fal-ai/kling-video/v3/pro/image-to-video",
             {
                 "image_url": product_image_url,
                 "prompt": prompt,
