@@ -45,6 +45,8 @@ def _build_ugc_pipeline() -> UgcPipelineService:
         GoogleTTSService,
         MediaComposerService,
         MubertMusicService,
+        VeoVideoService,
+        VideoPipelineService,
     )
 
     fal = FalAIService(api_key=settings.FAL_API_KEY)
@@ -62,9 +64,28 @@ def _build_ugc_pipeline() -> UgcPipelineService:
     composer = MediaComposerService()
     storage = AssetStorage.from_settings()
     llm = LLMService(settings.ANTHROPIC_API_KEY) if settings.ANTHROPIC_API_KEY else None
+    veo_pipeline = VideoPipelineService(
+        veo=VeoVideoService(
+            project_id=settings.VEO_PROJECT_ID,
+            access_token=settings.VEO_ACCESS_TOKEN,
+            gcs_bucket=settings.VEO_GCS_BUCKET,
+            location=settings.VEO_LOCATION,
+            default_model_id=settings.VEO_MODEL_ID,
+        ),
+        tts=tts,
+        music=music,
+        composer=composer,
+        storage=storage,
+    )
 
     return UgcPipelineService(
-        fal=fal, tts=tts, music=music, composer=composer, storage=storage, llm=llm,
+        fal=fal,
+        tts=tts,
+        music=music,
+        composer=composer,
+        storage=storage,
+        llm=llm,
+        veo_pipeline=veo_pipeline,
     )
 
 
@@ -161,9 +182,16 @@ async def generate_video(
     pipeline = _build_ugc_pipeline()
 
     if not pipeline._fal.configured:
+        if body.settings.render_mode == "talking_head":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="FAL_API_KEY is not configured.",
+            )
+
+    if body.settings.render_mode == "storyboard_action" and not pipeline.storyboard_configured:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="FAL_API_KEY is not configured.",
+            detail="VEO_PROJECT_ID, VEO_ACCESS_TOKEN, and VEO_GCS_BUCKET are required for storyboard mode.",
         )
 
     if not body.avatar.image_url:
@@ -182,6 +210,7 @@ async def generate_video(
         steps=[UgcPipelineStep(step=name) for name in UgcPipelineService.STEP_NAMES],
         avatar=body.avatar,
         product_image_url=body.product_image_url,
+        product_name=body.product_name,
         script=body.script,
         settings=body.settings,
         created_at=datetime.now(timezone.utc),

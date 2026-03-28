@@ -692,6 +692,10 @@ class VideoPipelineService:
         self._composer = composer
         self._storage = storage
 
+    @property
+    def configured(self) -> bool:
+        return self._veo.configured
+
     async def render_execution(
         self,
         *,

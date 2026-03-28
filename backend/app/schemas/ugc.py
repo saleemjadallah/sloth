@@ -49,6 +49,18 @@ class UgcVideoSettings(BaseModel):
     target_duration_seconds: int = 25
     aspect_ratio: Literal["9:16", "16:9", "1:1"] = "9:16"
     resolution: Literal["720p", "1080p"] = "720p"
+    render_mode: Literal["talking_head", "storyboard_action"] = "storyboard_action"
+    scenario: Literal[
+        "product_demo",
+        "closet",
+        "bathroom",
+        "bedroom",
+        "kitchen",
+        "desk",
+        "car",
+        "gym",
+    ] = "product_demo"
+    scene_count: int = 4
     tts_voice_name: str = "en-US-Studio-O"
     tts_speaking_rate: float = 1.0
     tts_pitch: float = 0.0
@@ -96,6 +108,7 @@ class UgcJobState(BaseModel):
     steps: list[UgcPipelineStep] = Field(default_factory=list)
     avatar: UgcAvatar | None = None
     product_image_url: str = ""
+    product_name: str = ""
     script: UgcScript | None = None
     settings: UgcVideoSettings = Field(default_factory=UgcVideoSettings)
     artifacts: list[UgcArtifact] = Field(default_factory=list)

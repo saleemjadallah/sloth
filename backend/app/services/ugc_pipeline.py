@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import mimetypes
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -304,7 +306,7 @@ Rules:
 class UgcPipelineService:
     """Orchestrates the full UGC video pipeline."""
 
-    STEP_NAMES = ["script", "composite", "tts", "talking_head", "broll", "compose"]
+    STEP_NAMES = ["script", "plan", "composite", "tts", "talking_head", "broll", "render", "compose"]
 
     def __init__(
         self,
@@ -315,6 +317,7 @@ class UgcPipelineService:
         composer: MediaComposerService,
         storage: AssetStorage,
         llm: "LLMService | None" = None,
+        veo_pipeline: "VideoPipelineService | None" = None,
     ) -> None:
         self._fal = fal
         self._tts = tts
@@ -322,6 +325,11 @@ class UgcPipelineService:
         self._composer = composer
         self._storage = storage
         self._llm = llm
+        self._veo_pipeline = veo_pipeline
+
+    @property
+    def storyboard_configured(self) -> bool:
+        return bool(self._veo_pipeline and self._veo_pipeline.configured)
 
     # ── Step 1: Script ──────────────────────────────────────────────────
 
@@ -632,6 +640,205 @@ class UgcPipelineService:
             file_name=file_name,
         )
 
+    def _build_storyboard_shots(
+        self,
+        *,
+        scenario: str,
+        product_name: str,
+        key_benefit: str,
+        scene_count: int,
+    ) -> list[str]:
+        benefit_line = key_benefit.strip() or "the main benefit"
+        templates: dict[str, list[str]] = {
+            "product_demo": [
+                f"Open in a handheld selfie shot with the creator already holding the {product_name} close to camera.",
+                f"Cut to a medium shot where the creator turns the {product_name} in hand and calls out {benefit_line}.",
+                f"Show a natural lifestyle moment where the creator demonstrates the {product_name} in use with clear visibility.",
+                f"End on a confident close shot with the creator presenting the {product_name} to camera for the CTA.",
+            ],
+            "closet": [
+                f"Show the creator walking to a bedroom closet and reaching in for the {product_name}.",
+                f"Show the creator pulling the {product_name} from the closet and turning back toward the camera.",
+                f"Switch to a selfie-style shot where the creator holds the {product_name} and explains {benefit_line}.",
+                f"Finish with the creator using or showcasing the {product_name} naturally and landing the CTA.",
+            ],
+            "bathroom": [
+                f"Open in a bathroom mirror setup as the creator reaches for the {product_name} from the counter or shelf.",
+                f"Show the creator holding the {product_name} near the sink and introducing why it matters.",
+                f"Capture a natural demo shot of the creator using the {product_name} with realistic hand interaction.",
+                f"End with the creator facing camera in the bathroom holding the {product_name} for the CTA.",
+            ],
+            "bedroom": [
+                f"Open with the creator moving across a bedroom space toward the {product_name}.",
+                f"Show the creator sitting or standing in the bedroom while holding the {product_name} and introducing it.",
+                f"Capture a relaxed lifestyle shot of the creator demonstrating the {product_name} in a bedroom setting.",
+                f"End with a close, conversational CTA shot with the {product_name} clearly visible.",
+            ],
+            "kitchen": [
+                f"Open in a kitchen as the creator picks up the {product_name} from the counter or cabinet.",
+                f"Show a medium shot of the creator holding the {product_name} and explaining {benefit_line}.",
+                f"Capture a realistic kitchen-use demonstration with the {product_name} clearly visible throughout.",
+                f"End with the creator presenting the {product_name} to camera in the kitchen for the CTA.",
+            ],
+            "desk": [
+                f"Open at a desk setup as the creator reaches for the {product_name}.",
+                f"Show the creator holding the {product_name} in a seated talking-to-camera shot.",
+                f"Capture a practical desk-side demonstration focused on {benefit_line}.",
+                f"End with a direct-to-camera CTA while the {product_name} stays prominent in frame.",
+            ],
+            "car": [
+                f"Open in or beside a parked car as the creator grabs the {product_name}.",
+                f"Show the creator holding the {product_name} and talking naturally in a car-life setting.",
+                f"Capture a believable in-car or beside-car demo moment with the {product_name} in active use.",
+                f"Finish with a strong CTA shot where the creator presents the {product_name} clearly to camera.",
+            ],
+            "gym": [
+                f"Open in a gym or workout setting as the creator reaches for the {product_name}.",
+                f"Show the creator holding the {product_name} and introducing it between workout moments.",
+                f"Capture a realistic action shot where the creator uses or demonstrates the {product_name} naturally.",
+                f"End with a confident CTA shot while the {product_name} remains clear and unchanged.",
+            ],
+        }
+        shots = templates.get(scenario, templates["product_demo"])
+        count = max(2, min(scene_count, len(shots)))
+        return shots[:count]
+
+    @staticmethod
+    def _guess_image_mime_type(url_or_key: str, fallback: str = "image/jpeg") -> str:
+        guessed, _ = mimetypes.guess_type(url_or_key)
+        if guessed and guessed.startswith("image/"):
+            return guessed
+        return fallback
+
+    def _build_storyboard_assets(
+        self,
+        *,
+        avatar: Any,
+        product_image_url: str,
+    ) -> list[dict[str, Any]]:
+        avatar_url = str(getattr(avatar, "image_url", "") or "")
+        return [
+            {
+                "id": "ugc-avatar-reference",
+                "stored_url": avatar_url if not avatar_url.startswith("http") else "",
+                "source_url": avatar_url if avatar_url.startswith("http") else "",
+                "mime_type": self._guess_image_mime_type(avatar_url),
+                "description": "Avatar identity reference",
+            },
+            {
+                "id": "ugc-product-reference",
+                "stored_url": product_image_url if not product_image_url.startswith("http") else "",
+                "source_url": product_image_url if product_image_url.startswith("http") else "",
+                "mime_type": self._guess_image_mime_type(product_image_url),
+                "description": "Product identity reference",
+            },
+        ]
+
+    def _build_storyboard_execution(
+        self,
+        *,
+        brand_name: str,
+        request: UgcGenerateVideoRequest,
+        selected_assets: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if self._veo_pipeline is None:
+            raise UgcPipelineError("Storyboard mode is unavailable because Veo is not configured.")
+
+        product_name = request.product_name or brand_name or "product"
+        body_text = " ".join(
+            segment.text.strip()
+            for segment in request.script.segments
+            if segment.role == "body" and segment.text.strip()
+        )
+        key_benefit = body_text[:180]
+        shots = self._build_storyboard_shots(
+            scenario=request.settings.scenario,
+            product_name=product_name,
+            key_benefit=key_benefit,
+            scene_count=request.settings.scene_count,
+        )
+        scenario_label = request.settings.scenario.replace("_", " ").title()
+        scene_duration_seconds = max(
+            5,
+            min(
+                8,
+                int(
+                    math.ceil(
+                        max(request.settings.target_duration_seconds, 8)
+                        / max(len(shots), 1)
+                    )
+                ),
+            ),
+        )
+        base_settings = {
+            **self._veo_pipeline.DEFAULT_SETTINGS,
+            "render_strategy": "scene_sequence",
+            "generation_mode": "reference_images",
+            "aspect_ratio": request.settings.aspect_ratio,
+            "resolution": request.settings.resolution,
+            "scene_duration_seconds": scene_duration_seconds,
+            "create_voiceover": True,
+            "create_music": bool(request.settings.include_music),
+            "compose_final": True,
+            "stitch_scenes": True,
+            "tts_voice_name": request.settings.tts_voice_name,
+            "tts_speaking_rate": request.settings.tts_speaking_rate,
+            "tts_pitch": request.settings.tts_pitch,
+            "music_prompt": request.settings.music_prompt,
+            "music_intensity": request.settings.music_intensity,
+            "negative_prompt": (
+                "extra products, duplicate people, warped fingers, mangled hands, "
+                "label changes, wrong product shape, broken continuity, text overlays"
+            ),
+            "reference_asset_ids": [str(asset["id"]) for asset in selected_assets],
+        }
+        execution = {
+            "concept_name": f"{scenario_label} UGC",
+            "summary": (
+                f"UGC-style short-form ad for {brand_name or 'the brand'} featuring the same avatar "
+                f"and the exact same {product_name} across every scene."
+            ),
+            "video_brief": {
+                "concept": f"{scenario_label} creator demo",
+                "opening_shot": shots[0],
+                "shot_list": shots,
+                "voiceover_script": request.script.full_text,
+                "end_frame": shots[-1],
+                "veo_prompt": " ".join(
+                    part
+                    for part in [
+                        f"Create a vertical UGC ad for {brand_name or 'the brand'}.",
+                        "Use the avatar reference for the same person identity, face, body type, wardrobe vibe, and hairstyle in every shot.",
+                        f"Use the product reference for the exact same {product_name} shape, packaging, colors, label placement, and scale in every shot.",
+                        f"Set the scenario in a realistic {request.settings.scenario.replace('_', ' ')} environment with handheld phone-camera energy.",
+                        "Prioritize natural hand interaction with the product, believable body movement, clean continuity, and commercial clarity.",
+                        "The creator should pick up, hold, carry, show, and use the product naturally without morphing it.",
+                    ]
+                    if part
+                ),
+            },
+        }
+        scenes = self._veo_pipeline.build_scene_plan(
+            execution=execution,
+            selected_assets=selected_assets,
+            settings=base_settings,
+        )
+        execution["video_render"] = {
+            "settings": base_settings,
+            "scenes": scenes,
+        }
+        return execution, base_settings
+
+    @staticmethod
+    def _to_ugc_artifact(rendered: RenderedBinary) -> UgcArtifact:
+        return UgcArtifact(
+            kind=rendered.kind,
+            label=rendered.label,
+            stored_url=rendered.stored_url,
+            mime_type=rendered.mime_type,
+            file_name=rendered.file_name,
+        )
+
     # ── Full pipeline orchestrator ──────────────────────────────────────
 
     async def run_pipeline(
@@ -653,7 +860,7 @@ class UgcPipelineService:
             s.status = status  # type: ignore[assignment]
             if status == "running":
                 s.started_at = datetime.now(timezone.utc)
-            elif status in ("completed", "failed"):
+            elif status in ("completed", "failed", "skipped"):
                 s.completed_at = datetime.now(timezone.utc)
             s.error = error
             job.updated_at = datetime.now(timezone.utc)
@@ -665,80 +872,168 @@ class UgcPipelineService:
         if on_update:
             on_update(job)
 
-        # Ensure product and avatar images are publicly accessible for fal.ai
-        product_image_url = await self._ensure_public_url(
-            request.product_image_url, "product.jpg", "image/jpeg",
-        )
-        avatar_image_url = await self._ensure_public_url(
-            request.avatar.image_url, "avatar.jpg", "image/jpeg",
-        )
-
         try:
             # Script is already provided in request — mark done
             _mark("script", "completed")
 
-            # Steps 2 + 3 in parallel: composite + TTS
-            _mark("composite", "running")
-            _mark("tts", "running")
+            if request.settings.render_mode == "storyboard_action":
+                if self._veo_pipeline is None or not self._veo_pipeline.configured:
+                    raise UgcPipelineError(
+                        "Storyboard mode requires VEO_PROJECT_ID, VEO_ACCESS_TOKEN, and VEO_GCS_BUCKET."
+                    )
 
-            composite_task = self.generate_composite(
-                avatar_image_url=avatar_image_url,
-                product_image_url=product_image_url,
-                brand_name=brand_name,
-                product_name=request.product_name or "product",
-                storage_prefix=storage_prefix,
-            )
-            voiceover_task = self.generate_voiceover(
-                script=request.script,
-                settings=request.settings,
-                storage_prefix=storage_prefix,
-            )
-            composite_artifact, voiceover_artifact = await asyncio.gather(
-                composite_task, voiceover_task
-            )
-            job.artifacts.extend([composite_artifact, voiceover_artifact])
-            _mark("composite", "completed")
-            _mark("tts", "completed")
+                _mark("composite", "skipped")
+                _mark("talking_head", "skipped")
+                _mark("broll", "skipped")
 
-            # Steps 4 + 5 in parallel: talking head + B-roll
-            _mark("talking_head", "running")
-            _mark("broll", "running")
+                selected_assets = self._build_storyboard_assets(
+                    avatar=request.avatar,
+                    product_image_url=request.product_image_url,
+                )
 
-            talking_head_task = self.generate_talking_head(
-                composite_stored_url=composite_artifact.stored_url or "",
-                voiceover_stored_url=voiceover_artifact.stored_url or "",
-                resolution=request.settings.resolution,
-                storage_prefix=storage_prefix,
-            )
-            broll_task = self.generate_broll_clips(
-                product_image_url=product_image_url,
-                product_name=request.product_name or "product",
-                brand_name=brand_name,
-                count=request.settings.broll_count,
-                duration_seconds=request.settings.broll_duration_seconds,
-                storage_prefix=storage_prefix,
-            )
-            talking_head_artifact, broll_artifacts = await asyncio.gather(
-                talking_head_task, broll_task
-            )
-            job.artifacts.append(talking_head_artifact)
-            job.artifacts.extend(broll_artifacts)
-            _mark("talking_head", "completed")
-            _mark("broll", "completed")
+                _mark("plan", "running")
+                execution, _ = self._build_storyboard_execution(
+                    brand_name=brand_name,
+                    request=request,
+                    selected_assets=selected_assets,
+                )
+                _mark("plan", "completed")
 
-            # Step 6: compose
-            _mark("compose", "running")
-            final_artifact = await self.compose_final_video(
-                talking_head_artifact=talking_head_artifact,
-                broll_artifacts=broll_artifacts,
-                voiceover_artifact=voiceover_artifact,
-                script=request.script,
-                settings=request.settings,
-                storage_prefix=storage_prefix,
-            )
-            job.artifacts.append(final_artifact)
-            job.final_video_url = final_artifact.stored_url
-            _mark("compose", "completed")
+                _mark("tts", "running")
+                _mark("render", "running")
+                _mark("compose", "running")
+
+                result = await self._veo_pipeline.render_execution(
+                    brand_name=brand_name,
+                    execution=execution,
+                    selected_assets=selected_assets,
+                    storage_prefix=storage_prefix,
+                    regenerate_scenes=False,
+                )
+
+                persisted_scene_artifacts: list[UgcArtifact] = []
+                for artifact in result.scene_videos:
+                    persisted = await self._veo_pipeline.persist_artifact(
+                        brand_id=str(request.brand_id),
+                        storage_prefix=storage_prefix,
+                        artifact=artifact,
+                    )
+                    persisted_scene_artifacts.append(self._to_ugc_artifact(persisted))
+                job.artifacts.extend(persisted_scene_artifacts)
+
+                if result.voiceover is not None:
+                    persisted_voiceover = await self._veo_pipeline.persist_artifact(
+                        brand_id=str(request.brand_id),
+                        storage_prefix=storage_prefix,
+                        artifact=result.voiceover,
+                    )
+                    job.artifacts.append(self._to_ugc_artifact(persisted_voiceover))
+                    _mark("tts", "completed")
+                else:
+                    _mark("tts", "skipped")
+
+                if result.music is not None:
+                    persisted_music = await self._veo_pipeline.persist_artifact(
+                        brand_id=str(request.brand_id),
+                        storage_prefix=storage_prefix,
+                        artifact=result.music,
+                    )
+                    job.artifacts.append(self._to_ugc_artifact(persisted_music))
+
+                if result.stitched_video is not None:
+                    persisted_stitched = await self._veo_pipeline.persist_artifact(
+                        brand_id=str(request.brand_id),
+                        storage_prefix=storage_prefix,
+                        artifact=result.stitched_video,
+                    )
+                    job.artifacts.append(self._to_ugc_artifact(persisted_stitched))
+
+                if result.final_video is None:
+                    raise UgcPipelineError("Storyboard mode completed without a final video artifact.")
+                persisted_final = await self._veo_pipeline.persist_artifact(
+                    brand_id=str(request.brand_id),
+                    storage_prefix=storage_prefix,
+                    artifact=result.final_video,
+                )
+                final_artifact = self._to_ugc_artifact(persisted_final)
+                job.artifacts.append(final_artifact)
+                job.final_video_url = final_artifact.stored_url
+                _mark("render", "completed")
+                _mark("compose", "completed")
+            else:
+                _mark("plan", "skipped")
+                _mark("render", "skipped")
+
+                # Ensure product and avatar images are publicly accessible for fal.ai
+                product_image_url = await self._ensure_public_url(
+                    request.product_image_url, "product.jpg", "image/jpeg",
+                )
+                avatar_image_url = await self._ensure_public_url(
+                    request.avatar.image_url, "avatar.jpg", "image/jpeg",
+                )
+
+                # Steps 2 + 3 in parallel: composite + TTS
+                _mark("composite", "running")
+                _mark("tts", "running")
+
+                composite_task = self.generate_composite(
+                    avatar_image_url=avatar_image_url,
+                    product_image_url=product_image_url,
+                    brand_name=brand_name,
+                    product_name=request.product_name or "product",
+                    storage_prefix=storage_prefix,
+                )
+                voiceover_task = self.generate_voiceover(
+                    script=request.script,
+                    settings=request.settings,
+                    storage_prefix=storage_prefix,
+                )
+                composite_artifact, voiceover_artifact = await asyncio.gather(
+                    composite_task, voiceover_task
+                )
+                job.artifacts.extend([composite_artifact, voiceover_artifact])
+                _mark("composite", "completed")
+                _mark("tts", "completed")
+
+                # Steps 4 + 5 in parallel: talking head + B-roll
+                _mark("talking_head", "running")
+                _mark("broll", "running")
+
+                talking_head_task = self.generate_talking_head(
+                    composite_stored_url=composite_artifact.stored_url or "",
+                    voiceover_stored_url=voiceover_artifact.stored_url or "",
+                    resolution=request.settings.resolution,
+                    storage_prefix=storage_prefix,
+                )
+                broll_task = self.generate_broll_clips(
+                    product_image_url=product_image_url,
+                    product_name=request.product_name or "product",
+                    brand_name=brand_name,
+                    count=request.settings.broll_count,
+                    duration_seconds=request.settings.broll_duration_seconds,
+                    storage_prefix=storage_prefix,
+                )
+                talking_head_artifact, broll_artifacts = await asyncio.gather(
+                    talking_head_task, broll_task
+                )
+                job.artifacts.append(talking_head_artifact)
+                job.artifacts.extend(broll_artifacts)
+                _mark("talking_head", "completed")
+                _mark("broll", "completed")
+
+                # Step 6: compose
+                _mark("compose", "running")
+                final_artifact = await self.compose_final_video(
+                    talking_head_artifact=talking_head_artifact,
+                    broll_artifacts=broll_artifacts,
+                    voiceover_artifact=voiceover_artifact,
+                    script=request.script,
+                    settings=request.settings,
+                    storage_prefix=storage_prefix,
+                )
+                job.artifacts.append(final_artifact)
+                job.final_video_url = final_artifact.stored_url
+                _mark("compose", "completed")
 
             job.status = "completed"
 
