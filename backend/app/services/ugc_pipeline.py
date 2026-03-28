@@ -190,12 +190,12 @@ class FalAIService:
                         "path": "https://huggingface.co/XLabs-AI/flux-ip-adapter-v2/resolve/main/ip_adapter.safetensors",
                         "image_encoder_path": "openai/clip-vit-large-patch14",
                         "image_url": product_image_url,
-                        "scale": 0.6,
+                        "scale": 0.4,
                     }
                 ],
                 "guidance_scale": 7.5,
                 "num_inference_steps": 30,
-                "image_size": "portrait_4_3",
+                "image_size": "portrait_16_9",
                 "num_images": 1,
             },
             timeout_seconds=600,
@@ -418,9 +418,11 @@ class UgcPipelineService:
     ) -> UgcArtifact:
         """Create a reference image showing the avatar holding/using the product."""
         prompt = (
-            f"A person holding a {product_name} product and looking directly at the camera, "
-            f"UGC style, natural lighting, social media ad aesthetic, "
-            f"the person is smiling and showcasing the product"
+            f"A half-body portrait of a person from the waist up, holding a {product_name} product "
+            f"in their hand in front of their chest, looking directly at the camera and smiling. "
+            f"The product is a separate physical object held in the person's hand, NOT part of the person's body. "
+            f"UGC selfie style, natural indoor lighting, social media ad aesthetic, "
+            f"the person's face, torso, arms, and hands are all clearly visible"
         )
         data = await self._fal.generate_composite_image(
             avatar_image_url=avatar_image_url,
