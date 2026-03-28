@@ -588,7 +588,7 @@ class CreativeStudioService:
             f"Angle: {concept['angle']} Hook: {concept['hook']} "
             f"Use these visual cues: {', '.join(brief_visual_direction or visual_notes or ['clean composition'])}. "
             f"Reference these assets or motifs: {', '.join(asset_names or ['brand visuals'])}. "
-            f"End frame should feature the CTA '{concept['cta']}'."
+            f"End with a clean branded frame with open space for text overlay."
         )
 
         return {
