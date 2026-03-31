@@ -162,6 +162,13 @@ class VeoVideoService:
 
     @classmethod
     def extract_video_payload(cls, result: dict[str, Any]) -> dict[str, Any]:
+        error = result.get("error")
+        if isinstance(error, dict) and error:
+            code = error.get("code")
+            message = str(error.get("message") or "Unknown Veo operation error.").strip()
+            if code is not None:
+                raise VideoPipelineError(f"Veo operation failed ({code}): {message}")
+            raise VideoPipelineError(f"Veo operation failed: {message}")
         for candidate in cls._walk_media_nodes(result):
             if candidate.get("gcsUri"):
                 return {
@@ -179,7 +186,10 @@ class VeoVideoService:
             reasons = result.get("response", {}).get("raiMediaFilteredReasons") or []
             joined = ", ".join(reasons) if isinstance(reasons, list) else "unknown"
             raise VideoPipelineError(f"Veo output was filtered by safety policies: {joined}")
-        raise VideoPipelineError("Veo completed without returning video media in the operation payload.")
+        raise VideoPipelineError(
+            "Veo completed without returning video media in the operation payload. "
+            f"Top-level keys: {', '.join(sorted(result.keys())) or 'none'}"
+        )
 
     async def generate(
         self,

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import mimetypes
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -758,18 +757,8 @@ class UgcPipelineService:
             scene_count=request.settings.scene_count,
         )
         scenario_label = request.settings.scenario.replace("_", " ").title()
-        scene_duration_seconds = max(
-            5,
-            min(
-                8,
-                int(
-                    math.ceil(
-                        max(request.settings.target_duration_seconds, 8)
-                        / max(len(shots), 1)
-                    )
-                ),
-            ),
-        )
+        # Veo reference-images mode is most reliable with 8s clips.
+        scene_duration_seconds = 8
         base_settings = {
             **self._veo_pipeline.DEFAULT_SETTINGS,
             "render_strategy": "scene_sequence",
