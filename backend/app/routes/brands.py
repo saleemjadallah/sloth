@@ -444,6 +444,26 @@ def _sync_workspace_selection_from_studio(brand: Brand) -> None:
     ]
 
 
+def _workspace_studio_has_reel(studio: dict | None) -> bool:
+    """Return True when the persisted studio contains at least one reel concept."""
+    if not isinstance(studio, dict):
+        return False
+    concepts = studio.get("concepts")
+    if not isinstance(concepts, list):
+        return False
+
+    for concept in concepts:
+        if not isinstance(concept, dict):
+            continue
+        signal = " ".join(
+            str(concept.get(field) or "")
+            for field in ("format", "name", "angle")
+        ).lower()
+        if any(keyword in signal for keyword in ("reel", "short-video", "short video", "video")):
+            return True
+    return False
+
+
 def _serialize_workspace_execution(brand: Brand) -> dict[str, object] | None:
     """Return the currently persisted execution pack, if any."""
     execution = brand.workspace_execution
@@ -839,6 +859,7 @@ async def get_brand_workspace(
     if (
         not isinstance(brand.workspace_studio, dict)
         or brand.workspace_concept_count != concept_count
+        or not _workspace_studio_has_reel(brand.workspace_studio)
     ):
         service = _get_creative_studio_service()
         studio = await service.build_studio(brand=brand, concept_count=concept_count)
@@ -866,6 +887,7 @@ async def get_brand_creative_studio(
     if (
         isinstance(brand.workspace_studio, dict)
         and brand.workspace_concept_count == concept_count
+        and _workspace_studio_has_reel(brand.workspace_studio)
     ):
         return brand.workspace_studio
 
