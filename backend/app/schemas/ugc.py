@@ -8,6 +8,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.creative import VideoRenderRuntimeConfig
+
 
 # ── Avatar ──────────────────────────────────────────────────────────────
 
@@ -150,6 +152,7 @@ class UgcGenerateVideoRequest(BaseModel):
     product_name: str = ""
     script: UgcScript
     settings: UgcVideoSettings = Field(default_factory=UgcVideoSettings)
+    runtime: VideoRenderRuntimeConfig | None = None
 
 
 class UgcGenerateVideoResponse(BaseModel):

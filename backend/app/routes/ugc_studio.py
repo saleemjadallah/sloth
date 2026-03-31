@@ -39,7 +39,7 @@ _job_store: dict[str, UgcJobState] = {}
 # ── Service factories ───────────────────────────────────────────────────
 
 
-def _build_ugc_pipeline() -> UgcPipelineService:
+def _build_ugc_pipeline(runtime: "VideoRenderRuntimeConfig | None" = None) -> UgcPipelineService:
     from app.services.llm_service import LLMService
     from app.services.video_pipeline import (
         GoogleTTSService,
@@ -48,6 +48,7 @@ def _build_ugc_pipeline() -> UgcPipelineService:
         VeoVideoService,
         VideoPipelineService,
     )
+    from app.schemas.creative import VideoRenderRuntimeConfig
 
     fal = FalAIService(api_key=settings.FAL_API_KEY)
     tts = GoogleTTSService(
@@ -64,12 +65,16 @@ def _build_ugc_pipeline() -> UgcPipelineService:
     composer = MediaComposerService()
     storage = AssetStorage.from_settings()
     llm = LLMService(settings.ANTHROPIC_API_KEY) if settings.ANTHROPIC_API_KEY else None
+    project_id = (runtime.project_id.strip() if runtime else "") or settings.VEO_PROJECT_ID
+    access_token = (runtime.access_token.strip() if runtime else "") or settings.VEO_ACCESS_TOKEN
+    gcs_bucket = (runtime.gcs_bucket.strip() if runtime else "") or settings.VEO_GCS_BUCKET
+    location = (runtime.location.strip() if runtime else "") or settings.VEO_LOCATION
     veo_pipeline = VideoPipelineService(
         veo=VeoVideoService(
-            project_id=settings.VEO_PROJECT_ID,
-            access_token=settings.VEO_ACCESS_TOKEN,
-            gcs_bucket=settings.VEO_GCS_BUCKET,
-            location=settings.VEO_LOCATION,
+            project_id=project_id,
+            access_token=access_token,
+            gcs_bucket=gcs_bucket,
+            location=location,
             default_model_id=settings.VEO_MODEL_ID,
         ),
         tts=tts,
@@ -179,7 +184,7 @@ async def generate_video(
 ) -> UgcGenerateVideoResponse:
     """Kick off the full UGC video pipeline. Returns immediately with a job_id."""
     brand = await _get_brand_or_404(body.brand_id, db)
-    pipeline = _build_ugc_pipeline()
+    pipeline = _build_ugc_pipeline(body.runtime)
 
     if not pipeline._fal.configured:
         if body.settings.render_mode == "talking_head":
