@@ -328,9 +328,9 @@ class CreativeStudioService:
             },
             {
                 "id": "concept-3",
-                "name": "Founder Style UGC",
-                "format": "short-video",
-                "angle": "Explain the product like a smart person-to-camera recommendation.",
+                "name": "Founder Voiceover Reel",
+                "format": "instagram-reel",
+                "angle": "Explain the product like a sharp vertical reel with a fast hook and proof-led pacing.",
                 "hook": f"\"If you need {outcome_desire.lower()}, stop doing it the hard way.\"",
                 "primary_text": (
                     f"A short script that introduces the problem, positions {brand.name or primary_product} "
@@ -338,25 +338,25 @@ class CreativeStudioService:
                 ),
                 "cta": "Try It For Yourself",
                 "why_it_will_work": (
-                    "UGC-style framing is the most flexible bridge into later storyboard and video production."
+                    "This gives the studio a reliable vertical reel format without depending on avatar lip sync or product-in-hand motion."
                 ),
                 "visual_direction": [
                     "Use candid framing, punchy captions, and fast first-three-second pacing.",
                     "Cut to supporting UI or product shots when the proof lands.",
-                    "Keep the delivery aligned with the extracted brand voice.",
+                    "Keep the delivery aligned with the extracted brand voice and leave room for safe-zone text overlays.",
                 ],
                 "asset_ids": demo_assets[:2],
                 "storyboard": [
-                    {"step": "Hook", "detail": "Open with a clear, opinionated statement about the audience problem."},
-                    {"step": "Demo", "detail": "Show the product or interface while naming the main benefit."},
-                    {"step": "Close", "detail": "End with a direct CTA and one memorable proof line."},
+                    {"step": "Hook", "detail": "Open with a clear, opinionated statement that lands in the first two seconds."},
+                    {"step": "Proof", "detail": "Cut to the strongest product, UI, or result visual while naming the main benefit."},
+                    {"step": "Close", "detail": "End with a direct CTA and one memorable proof line on screen."},
                 ],
             },
             {
                 "id": "concept-4",
-                "name": "Benefit Stack Demo",
-                "format": "short-video",
-                "angle": "Sequence the brand's best benefits into a quick motion-led walkthrough.",
+                "name": "Benefit Stack Reel",
+                "format": "instagram-reel",
+                "angle": "Sequence the brand's best benefits into a vertical reel with strong visual progression.",
                 "hook": f"Three reasons {brand.name or primary_product} stands out.",
                 "primary_text": (
                     f"Use a concise sequence of benefits drawn from the product set and value props, "
@@ -364,18 +364,18 @@ class CreativeStudioService:
                 ),
                 "cta": "Book A Demo",
                 "why_it_will_work": (
-                    "This creates a practical storyboard for video production while staying grounded in available assets."
+                    "This creates a practical reel storyboard that stays grounded in existing assets and performs well in short-form social placements."
                 ),
                 "visual_direction": [
                     "Open on the cleanest UI or product shot available.",
                     "Use one distinct visual for each benefit beat.",
-                    "End on a branded lockup and CTA frame.",
+                    "End on a branded lockup, CTA frame, and caption-safe composition.",
                 ],
                 "asset_ids": demo_assets[:3],
                 "storyboard": [
-                    {"step": "Intro", "detail": "Lead with brand and product recognition."},
-                    {"step": "Benefits", "detail": "Move through three short proof-driven feature beats."},
-                    {"step": "CTA", "detail": "Resolve with a branded end frame and next step."},
+                    {"step": "Intro", "detail": "Lead with immediate brand and product recognition in a vertical frame."},
+                    {"step": "Benefits", "detail": "Move through three short proof-driven feature beats with clean transitions."},
+                    {"step": "CTA", "detail": "Resolve with a branded end frame and next step that leaves room for captions."},
                 ],
             },
         ]
@@ -404,7 +404,7 @@ class CreativeStudioService:
                     "Keep layouts clean enough for quick iteration across channels.",
                     "Use product, interface, or proof visuals wherever possible.",
                 ],
-                "recommended_formats": ["static-image", "carousel", "short-video"],
+                "recommended_formats": ["instagram-reel", "static-image", "carousel", "short-video"],
             },
             "concepts": concepts[:concept_count],
         }
@@ -551,11 +551,11 @@ class CreativeStudioService:
                 "cta": concept["cta"],
             },
             {
-                "channel": "Instagram Story",
-                "format": "story",
+                "channel": "Instagram Reel",
+                "format": "9:16 video",
                 "headline": headlines[1],
                 "primary_text": primary_text_variants[1],
-                "cta": "Swipe Up",
+                "cta": "Learn More",
             },
             {
                 "channel": "LinkedIn Sponsored",
@@ -584,11 +584,12 @@ class CreativeStudioService:
             ]
 
         veo_prompt = (
-            f"Create a polished {concept['format']} ad for {brand_name}. "
+            f"Create a polished 9:16 Instagram Reel for {brand_name}. "
             f"Angle: {concept['angle']} Hook: {concept['hook']} "
             f"Use these visual cues: {', '.join(brief_visual_direction or visual_notes or ['clean composition'])}. "
             f"Reference these assets or motifs: {', '.join(asset_names or ['brand visuals'])}. "
-            f"End with a clean branded frame with open space for text overlay."
+            "Keep the pacing hook-first, design every shot for safe-zone captions, "
+            "and end with a clean branded frame with open space for text overlay."
         )
 
         return {
@@ -634,9 +635,10 @@ class CreativeStudioService:
             },
             "production_checklist": [
                 "Confirm the hero asset for the selected concept.",
-                "Adapt one headline per channel before export.",
+                "Adapt one hook and one CTA specifically for the Instagram Reel variant before export.",
                 "Keep claims inside the current brand profile and selected concept.",
                 "Use the video brief as the base prompt for storyboard or VEO rendering.",
+                "Keep the final cut vertical and readable with caption-safe text placement.",
             ],
         }
 
