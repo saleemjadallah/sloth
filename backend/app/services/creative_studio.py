@@ -229,6 +229,12 @@ class CreativeStudioService:
                 if len(normalized["concepts"]) == concept_count:
                     break
 
+        normalized["concepts"] = self._ensure_reel_concept(
+            normalized["concepts"],
+            fallback_concepts,
+            concept_count,
+        )
+
         if not normalized["summary"]:
             normalized["summary"] = (
                 f"{brand.name or brand.website_url} is ready for concept development."
@@ -384,6 +390,8 @@ class CreativeStudioService:
         tone = voice.get("tone") or "confident"
         style = voice.get("style") or "clear"
 
+        selected_concepts = self._ensure_reel_concept(concepts[:concept_count], concepts, concept_count)
+
         return {
             "summary": (
                 f"{brand.name or brand.website_url} has enough brand signal to move from analysis "
@@ -406,8 +414,47 @@ class CreativeStudioService:
                 ],
                 "recommended_formats": ["instagram-reel", "static-image", "carousel", "short-video"],
             },
-            "concepts": concepts[:concept_count],
+            "concepts": selected_concepts,
         }
+
+    @staticmethod
+    def _is_reel_concept(concept: dict[str, Any]) -> bool:
+        """Return True when the concept is suitable for the reel creator."""
+        signal = " ".join(
+            str(concept.get(field) or "")
+            for field in ("format", "name", "angle")
+        ).lower()
+        return any(keyword in signal for keyword in ("reel", "short-video", "short video", "video"))
+
+    def _ensure_reel_concept(
+        self,
+        concepts: list[dict[str, Any]],
+        fallback_concepts: list[dict[str, Any]],
+        concept_count: int,
+    ) -> list[dict[str, Any]]:
+        """Guarantee the concept set contains at least one reel candidate."""
+        if concept_count <= 0:
+            return []
+        if any(self._is_reel_concept(concept) for concept in concepts):
+            return concepts[:concept_count]
+
+        reel_fallback = next(
+            (concept for concept in fallback_concepts if self._is_reel_concept(concept)),
+            None,
+        )
+        if reel_fallback is None:
+            return concepts[:concept_count]
+
+        trimmed = list(concepts[:concept_count])
+        if len(trimmed) < concept_count:
+            trimmed.append(reel_fallback)
+            return trimmed[:concept_count]
+
+        if not trimmed:
+            return [reel_fallback]
+
+        trimmed[-1] = reel_fallback
+        return trimmed
 
     def _normalize_execution_payload(
         self,
