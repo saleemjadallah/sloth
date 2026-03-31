@@ -766,6 +766,7 @@ class UgcPipelineService:
             "aspect_ratio": request.settings.aspect_ratio,
             "resolution": request.settings.resolution,
             "scene_duration_seconds": scene_duration_seconds,
+            "person_generation": "allow_adult",
             "create_voiceover": True,
             "create_music": bool(request.settings.include_music),
             "compose_final": True,
@@ -777,7 +778,8 @@ class UgcPipelineService:
             "music_intensity": request.settings.music_intensity,
             "negative_prompt": (
                 "extra products, duplicate people, warped fingers, mangled hands, "
-                "label changes, wrong product shape, broken continuity, text overlays"
+                "label changes, wrong product shape, broken continuity, text overlays, "
+                "child, children, kid, teenager, teen, underage, baby face, school uniform, juvenile styling"
             ),
             "reference_asset_ids": [str(asset["id"]) for asset in selected_assets],
         }
@@ -797,11 +799,13 @@ class UgcPipelineService:
                     part
                     for part in [
                         f"Create a vertical UGC ad for {brand_name or 'the brand'}.",
+                        "The creator must be clearly and unambiguously an adult age 25 or older in every shot.",
                         "Use the avatar reference for the same person identity, face, body type, wardrobe vibe, and hairstyle in every shot.",
                         f"Use the product reference for the exact same {product_name} shape, packaging, colors, label placement, and scale in every shot.",
                         f"Set the scenario in a realistic {request.settings.scenario.replace('_', ' ')} environment with handheld phone-camera energy.",
                         "Prioritize natural hand interaction with the product, believable body movement, clean continuity, and commercial clarity.",
                         "The creator should pick up, hold, carry, show, and use the product naturally without morphing it.",
+                        "Do not depict children, teenagers, school-age people, or youthful facial proportions.",
                     ]
                     if part
                 ),

@@ -685,6 +685,7 @@ class VideoPipelineService:
         "reference_asset_ids": [],
         "first_frame_asset_id": None,
         "last_frame_asset_id": None,
+        "person_generation": None,
     }
 
     def __init__(
@@ -1168,6 +1169,8 @@ class VideoPipelineService:
             params["negativePrompt"] = str(settings["negative_prompt"])
         if settings.get("seed") is not None:
             params["seed"] = int(settings["seed"])
+        if settings.get("person_generation"):
+            params["personGeneration"] = str(settings["person_generation"])
         if settings.get("generate_native_audio"):
             params["generateAudio"] = True
         if settings.get("model_id", "").endswith("preview"):
