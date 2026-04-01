@@ -169,6 +169,30 @@ def _clean_prompt_parts(values: object, *, limit: int | None = None) -> list[str
     return items[:limit] if limit else items
 
 
+def _normalize_uuid_text_list(values: object) -> list[str]:
+    """Return a deduped list of canonical UUID strings."""
+    if not isinstance(values, (list, tuple, set)):
+        return []
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        if raw_value is None:
+            continue
+        text = str(raw_value).strip()
+        if not text or text.lower() in {"none", "null", "undefined"}:
+            continue
+        try:
+            parsed = str(uuid.UUID(text))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if parsed in seen:
+            continue
+        seen.add(parsed)
+        normalized.append(parsed)
+    return normalized
+
+
 def _summarize_brand_generation_prompt(brand: Brand, user_prompt: str) -> str:
     """Build a brand-context prompt for first-class asset generation."""
     voice = brand.voice or {}
@@ -437,11 +461,7 @@ def _sync_workspace_selection_from_studio(brand: Brand) -> None:
         if isinstance(selected_concept, dict)
         else None
     )
-    brand.workspace_selected_asset_ids = [
-        str(asset_id).strip()
-        for asset_id in selected_asset_ids or []
-        if str(asset_id).strip()
-    ]
+    brand.workspace_selected_asset_ids = _normalize_uuid_text_list(selected_asset_ids)
 
 
 def _workspace_studio_has_reel(studio: dict | None) -> bool:
@@ -500,7 +520,7 @@ async def _build_brand_workspace_response(
         "brand": brand,
         "studio": brand.workspace_studio,
         "selected_concept_id": brand.workspace_selected_concept_id,
-        "selected_asset_ids": brand.workspace_selected_asset_ids or [],
+        "selected_asset_ids": _normalize_uuid_text_list(brand.workspace_selected_asset_ids),
         "execution": workspace_execution,
         "saved_execution_id": workspace_saved_execution_id,
         "delivery": _sanitize_workspace_delivery(brand.workspace_delivery),
@@ -960,7 +980,7 @@ async def create_brand_creative_execution(
         concept=body.concept,
     )
     brand.workspace_selected_concept_id = body.concept.id
-    brand.workspace_selected_asset_ids = list(body.concept.asset_ids)
+    brand.workspace_selected_asset_ids = _normalize_uuid_text_list(body.concept.asset_ids)
     brand.workspace_execution = jsonable_encoder(execution)
     brand.workspace_saved_execution_id = None
     await db.flush()
@@ -1122,9 +1142,9 @@ async def render_brand_creative_execution_video(
     execution_payload["video_render"] = render_state
     brand.workspace_execution = jsonable_encoder(execution_payload)
     if created_assets:
-        existing_ids = [str(asset_id) for asset_id in (brand.workspace_selected_asset_ids or [])]
+        existing_ids = _normalize_uuid_text_list(brand.workspace_selected_asset_ids)
         existing_ids.extend(str(asset.id) for asset in created_assets)
-        brand.workspace_selected_asset_ids = list(dict.fromkeys(existing_ids))
+        brand.workspace_selected_asset_ids = _normalize_uuid_text_list(existing_ids)
     await db.flush()
     for asset in created_assets:
         await db.refresh(asset)
@@ -1154,7 +1174,7 @@ async def update_brand_workspace(
 
     if body.selected_concept_id is not None:
         brand.workspace_selected_concept_id = body.selected_concept_id
-    brand.workspace_selected_asset_ids = list(body.selected_asset_ids)
+    brand.workspace_selected_asset_ids = _normalize_uuid_text_list(body.selected_asset_ids)
 
     if body.execution is not None:
         brand.workspace_execution = body.execution.model_dump(mode="json")
@@ -1197,7 +1217,7 @@ async def save_brand_creative_execution(
     await db.refresh(record)
 
     brand.workspace_selected_concept_id = body.concept.id
-    brand.workspace_selected_asset_ids = list(body.concept.asset_ids)
+    brand.workspace_selected_asset_ids = _normalize_uuid_text_list(body.concept.asset_ids)
     brand.workspace_execution = body.execution.model_dump(mode="json")
     brand.workspace_saved_execution_id = record.id
     brand.workspace_delivery = {
