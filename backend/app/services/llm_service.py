@@ -111,6 +111,20 @@ Available assets:
 {asset_json}
 """
 
+CREATIVE_REGENERATION_APPENDIX_TEMPLATE = """\
+
+Current creative brief to stay grounded in:
+{brief_json}
+
+Existing concepts to replace:
+{existing_concepts_json}
+
+Important:
+- Generate a meaningfully different set of concepts from the existing set.
+- Do not reuse existing concept names, hooks, or angle framing.
+- Keep every concept aligned to the supplied brand profile, brief, and assets.
+"""
+
 EXECUTION_SYSTEM_PROMPT = """\
 You are a senior performance creative director. You take one selected ad \
 concept and expand it into a production-ready execution pack for copy, design, \
@@ -277,6 +291,8 @@ class LLMService:
         brand_context: dict[str, Any],
         asset_context: list[dict[str, Any]],
         concept_count: int,
+        previous_brief: dict[str, Any] | None = None,
+        existing_concepts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Generate a creative brief and concept set from a brand profile."""
         user_message = CREATIVE_USER_PROMPT_TEMPLATE.format(
@@ -284,6 +300,11 @@ class LLMService:
             brand_json=json.dumps(brand_context, indent=2),
             asset_json=json.dumps(asset_context, indent=2),
         )
+        if previous_brief or existing_concepts:
+            user_message += CREATIVE_REGENERATION_APPENDIX_TEMPLATE.format(
+                brief_json=json.dumps(previous_brief or {}, indent=2),
+                existing_concepts_json=json.dumps(existing_concepts or [], indent=2),
+            )
 
         try:
             return await self._request_json(

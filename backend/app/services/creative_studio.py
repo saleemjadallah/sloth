@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -36,10 +37,22 @@ class CreativeStudioService:
         self,
         brand: Brand,
         concept_count: int = 4,
+        previous_studio: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return creative strategy and concepts for the given brand."""
         asset_context = self._serialize_assets(brand)
-        fallback_payload = self._build_fallback_payload(brand, asset_context, concept_count)
+        previous_concepts = (
+            previous_studio.get("concepts")
+            if isinstance(previous_studio, dict)
+            and isinstance(previous_studio.get("concepts"), list)
+            else []
+        )
+        fallback_payload = self._build_fallback_payload(
+            brand,
+            asset_context,
+            concept_count,
+            previous_concepts=previous_concepts,
+        )
 
         payload = fallback_payload
         used_fallback = True
@@ -50,6 +63,17 @@ class CreativeStudioService:
                     brand_context=self._serialize_brand(brand),
                     asset_context=asset_context,
                     concept_count=concept_count,
+                    previous_brief=(
+                        previous_studio.get("brief")
+                        if isinstance(previous_studio, dict)
+                        and isinstance(previous_studio.get("brief"), dict)
+                        else None
+                    ),
+                    existing_concepts=[
+                        concept
+                        for concept in previous_concepts
+                        if isinstance(concept, dict)
+                    ],
                 )
                 payload = self._normalize_payload(
                     llm_payload,
@@ -57,6 +81,7 @@ class CreativeStudioService:
                     asset_context,
                     concept_count,
                     fallback_payload,
+                    previous_concepts=previous_concepts,
                 )
                 used_fallback = False
             except Exception:
@@ -130,10 +155,14 @@ class CreativeStudioService:
         asset_context: list[dict[str, Any]],
         concept_count: int,
         fallback_payload: dict[str, Any],
+        previous_concepts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Clean partial LLM output and guarantee a usable response."""
         valid_asset_ids = {asset["id"] for asset in asset_context}
         fallback_concepts = fallback_payload["concepts"]
+        previous_concepts = [
+            concept for concept in (previous_concepts or []) if isinstance(concept, dict)
+        ]
 
         normalized = {
             "summary": str(payload.get("summary") or fallback_payload["summary"]),
@@ -196,34 +225,41 @@ class CreativeStudioService:
                     if step and detail:
                         cleaned_storyboard.append({"step": step, "detail": detail})
 
-            normalized["concepts"].append(
-                {
-                    "id": str(concept.get("id") or f"concept-{index + 1}"),
-                    "name": str(concept.get("name") or fallback_concept["name"]),
-                    "format": str(concept.get("format") or fallback_concept["format"]),
-                    "angle": str(concept.get("angle") or fallback_concept["angle"]),
-                    "hook": str(concept.get("hook") or fallback_concept["hook"]),
-                    "primary_text": str(
-                        concept.get("primary_text") or fallback_concept["primary_text"]
-                    ),
-                    "cta": str(concept.get("cta") or fallback_concept["cta"]),
-                    "why_it_will_work": str(
-                        concept.get("why_it_will_work")
-                        or fallback_concept["why_it_will_work"]
-                    ),
-                    "visual_direction": self._clean_list(
-                        concept.get("visual_direction"),
-                        fallback_concept["visual_direction"],
-                    ),
-                    "asset_ids": asset_ids,
-                    "storyboard": cleaned_storyboard or fallback_concept["storyboard"],
-                }
-            )
+            normalized_concept = {
+                "id": str(concept.get("id") or f"concept-{index + 1}"),
+                "name": str(concept.get("name") or fallback_concept["name"]),
+                "format": str(concept.get("format") or fallback_concept["format"]),
+                "angle": str(concept.get("angle") or fallback_concept["angle"]),
+                "hook": str(concept.get("hook") or fallback_concept["hook"]),
+                "primary_text": str(
+                    concept.get("primary_text") or fallback_concept["primary_text"]
+                ),
+                "cta": str(concept.get("cta") or fallback_concept["cta"]),
+                "why_it_will_work": str(
+                    concept.get("why_it_will_work")
+                    or fallback_concept["why_it_will_work"]
+                ),
+                "visual_direction": self._clean_list(
+                    concept.get("visual_direction"),
+                    fallback_concept["visual_direction"],
+                ),
+                "asset_ids": asset_ids,
+                "storyboard": cleaned_storyboard or fallback_concept["storyboard"],
+            }
+            if not self._is_distinct_concept(
+                normalized_concept,
+                [*previous_concepts, *normalized["concepts"]],
+            ):
+                continue
+
+            normalized["concepts"].append(normalized_concept)
 
         if len(normalized["concepts"]) < concept_count:
-            existing_ids = {concept["id"] for concept in normalized["concepts"]}
             for fallback_concept in fallback_concepts:
-                if fallback_concept["id"] in existing_ids:
+                if not self._is_distinct_concept(
+                    fallback_concept,
+                    [*previous_concepts, *normalized["concepts"]],
+                ):
                     continue
                 normalized["concepts"].append(fallback_concept)
                 if len(normalized["concepts"]) == concept_count:
@@ -247,6 +283,7 @@ class CreativeStudioService:
         brand: Brand,
         asset_context: list[dict[str, Any]],
         concept_count: int,
+        previous_concepts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Build a deterministic creative plan when LLM output is unavailable."""
         voice = brand.voice or {}
@@ -384,13 +421,121 @@ class CreativeStudioService:
                     {"step": "CTA", "detail": "Resolve with a branded end frame and next step that leaves room for captions."},
                 ],
             },
+            {
+                "id": "concept-5",
+                "name": "Objection Crusher",
+                "format": "static-image",
+                "angle": "Answer the biggest buyer hesitation directly with a confident, proof-led visual.",
+                "hook": f"What makes {brand.name or primary_product} easier to trust at first glance?",
+                "primary_text": (
+                    f"Address the most likely objection around {proof_problem} and resolve it with the "
+                    f"most concrete benefit {brand.name or primary_product} can support."
+                ),
+                "cta": "Get The Details",
+                "why_it_will_work": (
+                    "Directly handling objections creates a differentiated static concept without drifting away from the brand inputs."
+                ),
+                "visual_direction": [
+                    "Use a bold objection headline paired with one concise answer.",
+                    "Anchor the layout with a clean product, UI, or brand proof visual.",
+                    "Keep supporting copy minimal so the concept reads instantly in-feed.",
+                ],
+                "asset_ids": demo_assets[:2] or brand_assets[:2],
+                "storyboard": [
+                    {"step": "Objection", "detail": "Open with the buyer hesitation in plain language."},
+                    {"step": "Answer", "detail": "Counter it with the strongest supported benefit or proof cue."},
+                    {"step": "Action", "detail": "Close on a clean CTA and branded footer treatment."},
+                ],
+            },
+            {
+                "id": "concept-6",
+                "name": "Use Case Sprint",
+                "format": "carousel",
+                "angle": "Walk through three concrete use cases that make the offer feel immediately practical.",
+                "hook": f"Three situations where {brand.name or primary_product} wins back time or clarity.",
+                "primary_text": (
+                    f"Map the brand into fast real-world scenarios for {audience_focus.lower()}, using each "
+                    f"slide to connect a pain point to a supported use case."
+                ),
+                "cta": "See The Use Cases",
+                "why_it_will_work": (
+                    "Use-case storytelling gives the user fresh concept territory while staying rooted in the brand brief."
+                ),
+                "visual_direction": [
+                    "Give each slide a distinct use case headline.",
+                    "Mix UI, product, or contextual visuals to make each scenario concrete.",
+                    "End with a final slide that unifies the value proposition and CTA.",
+                ],
+                "asset_ids": demo_assets[:3] or brand_assets[:3],
+                "storyboard": [
+                    {"step": "Scenario 1", "detail": "Introduce the first high-friction use case with a clear setup."},
+                    {"step": "Scenario 2", "detail": "Show a second use case that broadens the appeal."},
+                    {"step": "Scenario 3", "detail": "Land on the strongest transformation and CTA."},
+                ],
+            },
+            {
+                "id": "concept-7",
+                "name": "Demo Breakdown Reel",
+                "format": "short-video",
+                "angle": "Turn the best product moment into a fast educational reel with step-by-step progression.",
+                "hook": f"Watch how {brand.name or primary_product} removes the friction from {proof_problem}.",
+                "primary_text": (
+                    f"Guide the viewer through the clearest product flow or service moment, with pacing built "
+                    f"around the most persuasive benefit: {primary_value}."
+                ),
+                "cta": "Watch The Demo",
+                "why_it_will_work": (
+                    "A demo-led reel creates a genuinely different motion concept and keeps the story tightly aligned to the app brief."
+                ),
+                "visual_direction": [
+                    "Open on the cleanest product or UI state available.",
+                    "Use kinetic captions to label each step in the flow.",
+                    "Keep transitions sharp and proof-oriented rather than cinematic.",
+                ],
+                "asset_ids": demo_assets[:3] or brand_assets[:3],
+                "storyboard": [
+                    {"step": "Setup", "detail": "Frame the friction point in the first second."},
+                    {"step": "Walkthrough", "detail": "Move through the key product steps with on-screen captions."},
+                    {"step": "Payoff", "detail": "Finish on the result and a direct invitation to try it."},
+                ],
+            },
+            {
+                "id": "concept-8",
+                "name": "Category Reframe",
+                "format": "static-image",
+                "angle": "Reposition the brand with a sharper point of view on how the category should work.",
+                "hook": f"A cleaner way to think about {brand.industry or 'this category'}.",
+                "primary_text": (
+                    f"Present {brand.name or primary_product} as the smarter alternative to the messy, slow, or "
+                    f"overcomplicated status quo without inventing unsupported competitor claims."
+                ),
+                "cta": "See The Difference",
+                "why_it_will_work": (
+                    "A category reframe introduces a distinct top-of-funnel angle while staying constrained to the brief."
+                ),
+                "visual_direction": [
+                    "Use contrast-driven copy hierarchy to emphasize the old way versus the new way.",
+                    "Pair a strong brand visual with one opinionated headline.",
+                    "Keep the composition minimal and easy to scan in paid social placements.",
+                ],
+                "asset_ids": brand_assets[:2] or demo_assets[:2],
+                "storyboard": [
+                    {"step": "Frame", "detail": "Set up the category assumption or problem quickly."},
+                    {"step": "Reframe", "detail": "Introduce the new point of view with a strong supported claim."},
+                    {"step": "CTA", "detail": "Close on a simple next step and visual brand lockup."},
+                ],
+            },
         ]
 
         offer_summary = primary_value
         tone = voice.get("tone") or "confident"
         style = voice.get("style") or "clear"
 
-        selected_concepts = self._ensure_reel_concept(concepts[:concept_count], concepts, concept_count)
+        selected_concepts = self._select_concepts(
+            concepts,
+            concept_count,
+            previous_concepts=previous_concepts,
+        )
 
         return {
             "summary": (
@@ -455,6 +600,87 @@ class CreativeStudioService:
 
         trimmed[-1] = reel_fallback
         return trimmed
+
+    @staticmethod
+    def _concept_signal(concept: dict[str, Any]) -> str:
+        """Return the fields that best capture a concept's framing."""
+        return " ".join(
+            str(concept.get(field) or "").strip().lower()
+            for field in ("name", "format", "angle", "hook")
+        ).strip()
+
+    @classmethod
+    def _concept_tokens(cls, concept: dict[str, Any]) -> set[str]:
+        """Tokenize a concept for fuzzy duplicate detection."""
+        return {
+            token
+            for token in re.split(r"[^a-z0-9]+", cls._concept_signal(concept))
+            if len(token) >= 3
+        }
+
+    @classmethod
+    def _is_distinct_concept(
+        cls,
+        candidate: dict[str, Any],
+        existing_concepts: list[dict[str, Any]],
+    ) -> bool:
+        """Return False when a concept is too close to an existing one."""
+        candidate_signal = cls._concept_signal(candidate)
+        candidate_tokens = cls._concept_tokens(candidate)
+
+        for existing in existing_concepts:
+            existing_signal = cls._concept_signal(existing)
+            if not existing_signal:
+                continue
+            if candidate_signal and candidate_signal == existing_signal:
+                return False
+
+            for field in ("name", "hook", "angle"):
+                candidate_value = str(candidate.get(field) or "").strip().lower()
+                existing_value = str(existing.get(field) or "").strip().lower()
+                if candidate_value and candidate_value == existing_value:
+                    return False
+
+            existing_tokens = cls._concept_tokens(existing)
+            if candidate_tokens and existing_tokens:
+                overlap = len(candidate_tokens & existing_tokens)
+                union = len(candidate_tokens | existing_tokens)
+                if union and (overlap / union) >= 0.6:
+                    return False
+
+        return True
+
+    def _select_concepts(
+        self,
+        concepts: list[dict[str, Any]],
+        concept_count: int,
+        previous_concepts: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Pick a concept set, preferring concepts distinct from the prior studio."""
+        if concept_count <= 0:
+            return []
+
+        previous_concepts = [
+            concept for concept in (previous_concepts or []) if isinstance(concept, dict)
+        ]
+        selected: list[dict[str, Any]] = []
+
+        for concept in concepts:
+            if len(selected) >= concept_count:
+                break
+            if self._is_distinct_concept(concept, [*previous_concepts, *selected]):
+                selected.append(concept)
+
+        if len(selected) < concept_count:
+            for concept in concepts:
+                if len(selected) >= concept_count:
+                    break
+                if concept in selected:
+                    continue
+                if self._is_distinct_concept(concept, selected):
+                    selected.append(concept)
+
+        return self._ensure_reel_concept(selected, concepts, concept_count)
 
     def _normalize_execution_payload(
         self,

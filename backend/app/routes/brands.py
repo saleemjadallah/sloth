@@ -862,7 +862,11 @@ async def get_brand_workspace(
         or not _workspace_studio_has_reel(brand.workspace_studio)
     ):
         service = _get_creative_studio_service()
-        studio = await service.build_studio(brand=brand, concept_count=concept_count)
+        studio = await service.build_studio(
+            brand=brand,
+            concept_count=concept_count,
+            previous_studio=brand.workspace_studio if isinstance(brand.workspace_studio, dict) else None,
+        )
         brand.workspace_studio = jsonable_encoder(studio)
         brand.workspace_concept_count = concept_count
         _sync_workspace_selection_from_studio(brand)
@@ -892,12 +896,49 @@ async def get_brand_creative_studio(
         return brand.workspace_studio
 
     service = _get_creative_studio_service()
-    studio = await service.build_studio(brand=brand, concept_count=concept_count)
+    studio = await service.build_studio(
+        brand=brand,
+        concept_count=concept_count,
+        previous_studio=brand.workspace_studio if isinstance(brand.workspace_studio, dict) else None,
+    )
     brand.workspace_studio = jsonable_encoder(studio)
     brand.workspace_concept_count = concept_count
     _sync_workspace_selection_from_studio(brand)
     await db.flush()
     return brand.workspace_studio
+
+
+@router.post(
+    "/{brand_id}/workspace/regenerate",
+    response_model=BrandWorkspaceResponse,
+    summary="Regenerate the concept workspace for a brand",
+)
+async def regenerate_brand_workspace(
+    brand_id: uuid.UUID,
+    concept_count: int = Query(4, ge=2, le=6, description="Number of concepts"),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """Force a fresh concept set while preserving the rest of the workspace."""
+    brand = await _get_brand_or_404(brand_id, db, with_assets=True)
+    previous_studio = brand.workspace_studio if isinstance(brand.workspace_studio, dict) else None
+
+    service = _get_creative_studio_service()
+    studio = await service.build_studio(
+        brand=brand,
+        concept_count=concept_count,
+        previous_studio=previous_studio,
+    )
+
+    brand.workspace_studio = jsonable_encoder(studio)
+    brand.workspace_concept_count = concept_count
+    brand.workspace_selected_concept_id = None
+    brand.workspace_selected_asset_ids = []
+    brand.workspace_execution = None
+    brand.workspace_saved_execution_id = None
+    _sync_workspace_selection_from_studio(brand)
+    await db.flush()
+    brand = await _get_brand_or_404(brand.id, db, with_assets=True)
+    return await _build_brand_workspace_response(brand, db)
 
 
 @router.post(
